@@ -53,11 +53,13 @@ const RoomPage = () => {
   const [showPermissionOverlay, setShowPermissionOverlay] = useState(false);
   const [isJoiningMeeting, setIsJoiningMeeting] = useState(false);
   const [roomReady, setRoomReady] = useState(false);
+  const [isReady, setIsReady] = useState(false);
 
   // Store references
   const localStreamRef = useRef(null);
   const screenStreamRef = useRef(null);
   const isMountedRef = useRef(true);
+  const pendingSignaling = useRef(new Map());
 
   // Check if mobile
   useEffect(() => {
@@ -340,6 +342,13 @@ const RoomPage = () => {
     const handleOffer = async ({ offer, from }) => {
       if (!isMountedRef.current) return;
 
+      if (!isReady) {
+        const queue = pendingSignaling.current.get(from) || [];
+        queue.push({ type: "offer", data: { offer, from } });
+        pendingSignaling.current.set(from, queue);
+        return;
+      }
+
       console.log(`Received offer from ${from}`);
       let pc = peerConnections.get(from);
       if (!pc) {
@@ -362,6 +371,13 @@ const RoomPage = () => {
     };
 
     const handleAnswer = async ({ answer, from }) => {
+      if (!isReady) {
+        const queue = pendingSignaling.current.get(from) || [];
+        queue.push({ type: "answer", data: { answer, from } });
+        pendingSignaling.current.set(from, queue);
+        return;
+      }
+
       console.log(`Received answer from ${from}`);
       const pc = peerConnections.get(from);
       if (pc) {
@@ -374,6 +390,13 @@ const RoomPage = () => {
     };
 
     const handleIceCandidate = async ({ candidate, from }) => {
+      if (!isReady) {
+        const queue = pendingSignaling.current.get(from) || [];
+        queue.push({ type: "candidate", data: { candidate, from } });
+        pendingSignaling.current.set(from, queue);
+        return;
+      }
+
       const pc = peerConnections.get(from);
       if (pc && candidate) {
         try {
@@ -426,7 +449,7 @@ const RoomPage = () => {
         screenStreamRef.current.getTracks().forEach((track) => track.stop());
       }
     };
-  }, [socket, isConnected, roomId, userName]);
+  }, [socket, isConnected, roomId, userName, isReady, isJoiningMeeting]);
 
   // Handle permission decision
   const handlePermissionDecision = async (allowCamera) => {
@@ -441,19 +464,21 @@ const RoomPage = () => {
     }
 
     setIsJoiningMeeting(true);
+    setIsReady(true);
 
-    // Now create connections with existing participants
-    participants.forEach((participant, index) => {
-      if (participant.userId !== userId.current) {
-        setTimeout(() => {
-          if (!isMountedRef.current) return;
-          const pc = createPeerConnection(participant.userId);
-          if (pc) {
-            sendOffer(pc, participant.userId);
-          }
-        }, index * 500);
-      }
+    // Process pending signaling
+    pendingSignaling.current.forEach((queue, fromId) => {
+      queue.forEach((item) => {
+        if (item.type === "offer") {
+          handleOffer(item.data);
+        } else if (item.type === "answer") {
+          handleAnswer(item.data);
+        } else if (item.type === "candidate") {
+          handleIceCandidate(item.data);
+        }
+      });
     });
+    pendingSignaling.current.clear();
   };
 
   // Control functions
@@ -720,7 +745,7 @@ const RoomPage = () => {
                   isVideoEnabled ? (
                     <Video className="h-5 w-5 text-green-400" />
                   ) : (
-                    <VideoOff className="h-5 w-5 text-white" />
+                    <CameraOff className="h-5 w-5 text-white" />
                   )
                 ) : (
                   <CameraOff className="h-5 w-5 text-red-400" />
