@@ -144,7 +144,7 @@ const HomePage = () => {
                   onChange={(e) => setRoomId(e.target.value.toUpperCase())}
                   className="w-full px-4 py-3 bg-gray-900/50 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent transition"
                   placeholder="Enter room ID (e.g., ABCD1234)"
-                  pattern="[A-Z0-9]{8}"
+                  pattern="[a-z0-9]{8}"
                   title="8 character room ID"
                 />
                 <p className="mt-1 text-sm text-gray-500">
