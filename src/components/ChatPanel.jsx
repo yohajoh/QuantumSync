@@ -1,8 +1,13 @@
 import React, { useState, useRef, useEffect } from "react";
 import { format } from "date-fns";
-import { Send, Smile, Paperclip, MessageSquare } from "lucide-react";
+import { Send, Smile, Paperclip, MessageSquare, X } from "lucide-react";
 
-const ChatPanel = ({ messages, onSendMessage, currentUserId }) => {
+const ChatPanel = ({
+  messages,
+  onSendMessage,
+  currentUserId,
+  mobile = false,
+}) => {
   const [newMessage, setNewMessage] = useState("");
   const messagesEndRef = useRef(null);
 
@@ -23,24 +28,35 @@ const ChatPanel = ({ messages, onSendMessage, currentUserId }) => {
   };
 
   return (
-    <div className="bg-gray-900/80 backdrop-blur-lg rounded-xl border border-gray-800 flex flex-col h-[600px]">
-      {/* Header */}
-      <div className="p-4 border-b border-gray-800">
-        <h3 className="text-lg font-semibold text-white">Chat</h3>
-        <p className="text-sm text-gray-400">
-          Send messages to all participants
-        </p>
-      </div>
+    <div
+      className={`${
+        mobile
+          ? "h-full flex flex-col"
+          : "bg-gray-900/80 backdrop-blur-lg rounded-xl border border-gray-800 flex flex-col h-[600px]"
+      }`}
+    >
+      {!mobile && (
+        <>
+          <div className="p-4 border-b border-gray-800">
+            <h3 className="text-lg font-semibold text-white">Chat</h3>
+            <p className="text-sm text-gray-400">
+              Send messages to all participants
+            </p>
+          </div>
+        </>
+      )}
 
       {/* Messages Container */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-4">
+      <div
+        className={`flex-1 overflow-y-auto ${mobile ? "p-2" : "p-4"} space-y-3`}
+      >
         {messages.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-full text-center">
+          <div className="flex flex-col items-center justify-center h-full text-center p-4">
             <div className="w-16 h-16 rounded-full bg-gray-800 flex items-center justify-center mb-4">
               <MessageSquare className="h-8 w-8 text-gray-600" />
             </div>
             <p className="text-gray-400">No messages yet</p>
-            <p className="text-sm text-gray-500">
+            <p className="text-sm text-gray-500 mt-1">
               Send a message to start the conversation
             </p>
           </div>
@@ -55,7 +71,9 @@ const ChatPanel = ({ messages, onSendMessage, currentUserId }) => {
               }`}
             >
               <div
-                className={`max-w-xs lg:max-w-md rounded-2xl p-3 ${
+                className={`max-w-[85%] ${
+                  mobile ? "max-w-[90%]" : "lg:max-w-md"
+                } rounded-2xl p-3 ${
                   message.userId === currentUserId
                     ? "bg-primary-600 rounded-br-none"
                     : "bg-gray-800 rounded-bl-none"
@@ -75,7 +93,9 @@ const ChatPanel = ({ messages, onSendMessage, currentUserId }) => {
                     {format(new Date(message.timestamp), "HH:mm")}
                   </span>
                 </div>
-                <p className="text-sm text-white">{message.message}</p>
+                <p className="text-sm text-white break-words">
+                  {message.message}
+                </p>
               </div>
             </div>
           ))
@@ -84,7 +104,10 @@ const ChatPanel = ({ messages, onSendMessage, currentUserId }) => {
       </div>
 
       {/* Input Area */}
-      <form onSubmit={handleSubmit} className="p-4 border-t border-gray-800">
+      <form
+        onSubmit={handleSubmit}
+        className={`${mobile ? "p-3" : "p-4"} border-t border-gray-800`}
+      >
         <div className="flex items-center space-x-2">
           <button
             type="button"
