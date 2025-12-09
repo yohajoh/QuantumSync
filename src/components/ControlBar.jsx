@@ -8,11 +8,11 @@ import {
   Phone,
   MessageSquare,
   Users,
-  Settings,
   Maximize2,
   Minimize2,
   CameraOff,
   MicOff as MicDisabled,
+  Share2,
 } from "lucide-react";
 
 const ControlBar = ({
@@ -33,6 +33,7 @@ const ControlBar = ({
     return (
       <div className="fixed bottom-0 left-0 right-0 bg-gray-900/95 backdrop-blur-lg border-t border-gray-800 p-3 z-40">
         <div className="flex items-center justify-around">
+          {/* Video Toggle */}
           <button
             onClick={onToggleVideo}
             className={`flex flex-col items-center p-3 rounded-lg transition ${
@@ -54,6 +55,7 @@ const ControlBar = ({
             </span>
           </button>
 
+          {/* Audio Toggle */}
           <button
             onClick={onToggleAudio}
             className={`flex flex-col items-center p-3 rounded-lg transition ${
@@ -75,17 +77,42 @@ const ControlBar = ({
             </span>
           </button>
 
+          {/* Screen Share - Mobile */}
           <button
             onClick={onToggleScreenShare}
-            className="flex flex-col items-center p-3 rounded-lg bg-gray-800 transition"
+            className={`flex flex-col items-center p-3 rounded-lg transition ${
+              isScreenSharing ? "bg-blue-600" : "bg-gray-800 hover:bg-gray-700"
+            }`}
           >
-            <Monitor className="h-5 w-5 text-blue-400" />
-            <span className="text-xs mt-1 text-gray-300">Share</span>
+            <Share2
+              className={`h-5 w-5 ${
+                isScreenSharing ? "text-white" : "text-blue-400"
+              }`}
+            />
+            <span className="text-xs mt-1 text-gray-300">
+              {isScreenSharing ? "Stop" : "Share"}
+            </span>
           </button>
 
+          {/* Fullscreen Toggle - Mobile */}
+          <button
+            onClick={onToggleFullscreen}
+            className="flex flex-col items-center p-3 rounded-lg bg-gray-800 hover:bg-gray-700 transition"
+          >
+            {isFullscreen ? (
+              <Minimize2 className="h-5 w-5 text-gray-300" />
+            ) : (
+              <Maximize2 className="h-5 w-5 text-gray-300" />
+            )}
+            <span className="text-xs mt-1 text-gray-300">
+              {isFullscreen ? "Exit" : "Full"}
+            </span>
+          </button>
+
+          {/* Leave Room */}
           <button
             onClick={onLeaveRoom}
-            className="flex flex-col items-center p-3 rounded-lg bg-red-600 transition"
+            className="flex flex-col items-center p-3 rounded-lg bg-red-600 hover:bg-red-700 transition"
           >
             <Phone className="h-5 w-5 text-white transform rotate-135" />
             <span className="text-xs mt-1 text-white">Leave</span>
@@ -95,10 +122,11 @@ const ControlBar = ({
     );
   }
 
+  // Desktop Control Bar
   return (
     <div className="fixed bottom-8 left-1/2 transform -translate-x-1/2 z-40">
       <div className="bg-gray-900/90 backdrop-blur-xl border border-gray-800 rounded-2xl p-3 shadow-2xl">
-        <div className="flex items-center space-x-3">
+        <div className="flex items-center space-x-4">
           {/* Video Toggle */}
           <button
             onClick={onToggleVideo}
@@ -171,15 +199,15 @@ const ControlBar = ({
             } group`}
             title={isScreenSharing ? "Stop screen sharing" : "Share screen"}
           >
-            <Monitor
+            <Share2
               className={`h-6 w-6 ${
                 isScreenSharing
                   ? "text-white"
-                  : "text-gray-300 group-hover:text-white"
+                  : "text-blue-400 group-hover:text-blue-300"
               }`}
             />
             <span className="mt-1 text-xs font-medium text-gray-300 group-hover:text-white">
-              Share
+              {isScreenSharing ? "Stop Share" : "Share"}
             </span>
           </button>
 

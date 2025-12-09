@@ -18,6 +18,7 @@ import {
   Minimize2,
   CameraOff,
   MicOff,
+  Share2,
 } from "lucide-react";
 import toast from "react-hot-toast";
 
@@ -47,6 +48,11 @@ const RoomPage = () => {
   const [isMobile, setIsMobile] = useState(false);
   const [hasCameraAccess, setHasCameraAccess] = useState(false);
   const [hasMicAccess, setHasMicAccess] = useState(false);
+  const [activeScreenShare, setActiveScreenShare] = useState(null);
+
+  // Store references for cleanup
+  const localStreamRef = useRef(null);
+  const screenStreamRef = useRef(null);
 
   // Check if mobile
   useEffect(() => {
@@ -59,7 +65,6 @@ const RoomPage = () => {
     checkMobile();
     window.addEventListener("resize", checkMobile);
 
-    // Listen for fullscreen changes
     const handleFullscreenChange = () => {
       setIsFullscreen(!!document.fullscreenElement);
     };
@@ -72,120 +77,69 @@ const RoomPage = () => {
     };
   }, []);
 
-  // Initialize media with better error handling
-  const initializeMedia = useCallback(async () => {
-    if (localStream) {
-      console.log("Media already initialized");
-      return localStream;
-    }
+  // WebRTC configuration
+  const configuration = {
+    iceServers: [
+      { urls: "stun:stun.l.google.com:19302" },
+      { urls: "stun:stun1.l.google.com:19302" },
+      { urls: "stun:stun2.l.google.com:19302" },
+      { urls: "stun:stun3.l.google.com:19302" },
+    ],
+    iceCandidatePoolSize: 10,
+    bundlePolicy: "max-bundle",
+    rtcpMuxPolicy: "require",
+  };
 
+  // Initialize media
+  const initializeMedia = useCallback(async () => {
     try {
-      console.log("Requesting media permissions...");
+      console.log("📹 Initializing media...");
       setConnectionStatus("requesting-media");
 
-      // First check if we have any video/audio devices
-      const devices = await navigator.mediaDevices.enumerateDevices();
-      const hasVideoDevices = devices.some(
-        (device) => device.kind === "videoinput"
-      );
-      const hasAudioDevices = devices.some(
-        (device) => device.kind === "audioinput"
-      );
-
-      console.log("Available devices:", { hasVideoDevices, hasAudioDevices });
-
-      // Prepare constraints based on available devices
       const constraints = {
-        video: hasVideoDevices
-          ? {
-              width: { ideal: 1280, min: 640 },
-              height: { ideal: 720, min: 480 },
-              frameRate: { ideal: 30 },
-              facingMode: "user",
-              ...(isMobile && {
-                width: { ideal: 640 },
-                height: { ideal: 480 },
-                frameRate: { ideal: 24 },
-              }),
-            }
-          : false,
-
-        audio: hasAudioDevices
-          ? {
-              echoCancellation: true,
-              noiseSuppression: true,
-              autoGainControl: true,
-              ...(isMobile && {
-                sampleRate: 16000,
-                channelCount: 1,
-              }),
-            }
-          : false,
+        video: {
+          width: { ideal: 1280, min: 640 },
+          height: { ideal: 720, min: 480 },
+          frameRate: { ideal: 30 },
+          facingMode: "user",
+        },
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          channelCount: 2,
+        },
       };
 
-      console.log("Media constraints:", constraints);
-
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
-      console.log("Media stream obtained:", {
-        videoTracks: stream.getVideoTracks().length,
-        audioTracks: stream.getAudioTracks().length,
-      });
+      console.log("✅ Media obtained successfully");
 
-      // Check what we actually got
       const videoTrack = stream.getVideoTracks()[0];
       const audioTrack = stream.getAudioTracks()[0];
 
       setHasCameraAccess(!!videoTrack);
       setHasMicAccess(!!audioTrack);
 
-      // Enable tracks based on user preference
-      if (videoTrack) {
-        videoTrack.enabled = isVideoEnabled;
-        console.log("Video track enabled:", videoTrack.enabled);
-      }
-      if (audioTrack) {
-        audioTrack.enabled = isAudioEnabled;
-        console.log("Audio track enabled:", audioTrack.enabled);
-      }
+      if (videoTrack) videoTrack.enabled = isVideoEnabled;
+      if (audioTrack) audioTrack.enabled = isAudioEnabled;
 
       setLocalStream(stream);
+      localStreamRef.current = stream;
       setConnectionStatus("connected");
 
-      toast.success("Camera and microphone ready!");
       return stream;
     } catch (error) {
-      console.error("Media access error:", error.name, error.message);
+      console.error("❌ Media error:", error);
 
-      // Handle specific errors
-      if (
-        error.name === "NotAllowedError" ||
-        error.name === "PermissionDeniedError"
-      ) {
-        toast.error(
-          "Please allow camera and microphone access in browser settings"
-        );
+      if (error.name === "NotAllowedError") {
+        toast.error("Please allow camera and microphone access");
         setConnectionStatus("permission-denied");
-      } else if (
-        error.name === "NotFoundError" ||
-        error.name === "DevicesNotFoundError"
-      ) {
-        toast.error("No camera or microphone detected");
-        setConnectionStatus("no-devices");
-      } else if (
-        error.name === "NotReadableError" ||
-        error.name === "TrackStartError"
-      ) {
-        toast.error("Device is already in use by another application");
-        setConnectionStatus("device-busy");
-      } else if (error.name === "OverconstrainedError") {
-        toast.error("Requested camera settings not supported");
-        setConnectionStatus("constraint-error");
       } else {
         toast.error("Failed to access media devices");
         setConnectionStatus("error");
       }
 
-      // Create placeholder stream to continue
+      // Create placeholder
       const canvas = document.createElement("canvas");
       canvas.width = 640;
       canvas.height = 480;
@@ -195,49 +149,55 @@ const RoomPage = () => {
       ctx.fillStyle = "#3b82f6";
       ctx.font = "20px Arial";
       ctx.textAlign = "center";
-      ctx.fillText(hasCameraAccess ? "Camera Off" : "No Camera", 320, 240);
+      ctx.fillText("No Camera", 320, 240);
 
       const placeholderStream = canvas.captureStream(1);
       setLocalStream(placeholderStream);
+      localStreamRef.current = placeholderStream;
       setConnectionStatus("connected-no-media");
 
       return placeholderStream;
     }
-  }, [localStream, isVideoEnabled, isAudioEnabled, isMobile]);
+  }, [isVideoEnabled, isAudioEnabled]);
 
-  // Create peer connection
+  // Create peer connection - UPDATED for better reliability
   const createPeerConnection = useCallback(
     (targetUserId) => {
       try {
+        console.log(`🔗 Creating peer connection for: ${targetUserId}`);
+
         // Close existing connection if any
         const existingPc = peerConnections.get(targetUserId);
         if (existingPc) {
+          console.log(`Closing existing connection for ${targetUserId}`);
           existingPc.close();
         }
 
-        const pc = new RTCPeerConnection({
-          iceServers: [
-            { urls: "stun:stun.l.google.com:19302" },
-            { urls: "stun:stun1.l.google.com:19302" },
-          ],
-        });
+        const pc = new RTCPeerConnection(configuration);
 
-        // Add local tracks if available
-        if (localStream) {
-          localStream.getTracks().forEach((track) => {
-            if (track.kind === "video" && !isVideoEnabled) return;
+        // Add local tracks
+        const streamToUse =
+          isScreenSharing && screenStreamRef.current
+            ? screenStreamRef.current
+            : localStreamRef.current;
+        if (streamToUse) {
+          streamToUse.getTracks().forEach((track) => {
+            if (track.kind === "video" && !isVideoEnabled && !isScreenSharing)
+              return;
             if (track.kind === "audio" && !isAudioEnabled) return;
 
             try {
-              pc.addTrack(track, localStream);
+              pc.addTrack(track, streamToUse);
+              console.log(`✅ Added ${track.kind} track to ${targetUserId}`);
             } catch (err) {
-              console.warn("Failed to add track:", err);
+              console.warn(`Failed to add ${track.kind} track:`, err);
             }
           });
         }
 
         // Handle remote tracks
         pc.ontrack = (event) => {
+          console.log(`📥 Received remote track from ${targetUserId}`);
           if (event.streams && event.streams[0]) {
             setRemoteStreams((prev) => {
               const newMap = new Map(prev);
@@ -258,6 +218,36 @@ const RoomPage = () => {
           }
         };
 
+        // Connection state monitoring
+        pc.oniceconnectionstatechange = () => {
+          console.log(
+            `❄️ ICE state with ${targetUserId}:`,
+            pc.iceConnectionState
+          );
+          if (
+            pc.iceConnectionState === "connected" ||
+            pc.iceConnectionState === "completed"
+          ) {
+            console.log(`✅ Successfully connected to ${targetUserId}`);
+          } else if (pc.iceConnectionState === "failed") {
+            console.log(
+              `❌ Connection failed with ${targetUserId}, restarting ICE...`
+            );
+            setTimeout(() => {
+              if (pc.iceConnectionState === "failed") {
+                pc.restartIce();
+              }
+            }, 2000);
+          }
+        };
+
+        pc.onconnectionstatechange = () => {
+          console.log(
+            `🔌 Connection state with ${targetUserId}:`,
+            pc.connectionState
+          );
+        };
+
         // Store connection
         setPeerConnections((prev) => {
           const newMap = new Map(prev);
@@ -267,66 +257,152 @@ const RoomPage = () => {
 
         return pc;
       } catch (error) {
-        console.error("Failed to create peer connection:", error);
+        console.error("❌ Failed to create peer connection:", error);
         return null;
       }
     },
-    [localStream, isVideoEnabled, isAudioEnabled, socket, peerConnections]
+    [socket, peerConnections, isVideoEnabled, isAudioEnabled, isScreenSharing]
   );
+
+  // Handle screen sharing
+  const handleScreenShare = async () => {
+    try {
+      if (!isScreenSharing) {
+        // Start screen sharing
+        const screenStream = await navigator.mediaDevices.getDisplayMedia({
+          video: {
+            cursor: "always",
+            displaySurface: "monitor",
+          },
+          audio: false,
+        });
+
+        screenStreamRef.current = screenStream;
+        setIsScreenSharing(true);
+        setActiveScreenShare(userId.current);
+
+        // Replace video track in all peer connections
+        const screenTrack = screenStream.getVideoTracks()[0];
+        peerConnections.forEach((pc, targetUserId) => {
+          const sender = pc.getSenders().find((s) => s.track?.kind === "video");
+          if (sender && screenTrack) {
+            sender.replaceTrack(screenTrack);
+            console.log(
+              `🖥️ Replaced video track for ${targetUserId} with screen share`
+            );
+          }
+        });
+
+        // Handle screen share stop
+        screenTrack.onended = () => {
+          handleScreenShare();
+        };
+
+        toast.success("Screen sharing started");
+        socket.emit("screen-share-started", { roomId, userId: userId.current });
+      } else {
+        // Stop screen sharing
+        if (screenStreamRef.current) {
+          screenStreamRef.current.getTracks().forEach((track) => track.stop());
+          screenStreamRef.current = null;
+        }
+
+        setIsScreenSharing(false);
+        setActiveScreenShare(null);
+
+        // Restore camera track
+        if (localStreamRef.current) {
+          const cameraTrack = localStreamRef.current.getVideoTracks()[0];
+          if (cameraTrack) {
+            peerConnections.forEach((pc, targetUserId) => {
+              const sender = pc
+                .getSenders()
+                .find((s) => s.track?.kind === "video");
+              if (sender && cameraTrack) {
+                sender.replaceTrack(cameraTrack);
+                console.log(`📹 Restored camera track for ${targetUserId}`);
+              }
+            });
+          }
+        }
+
+        toast.success("Screen sharing stopped");
+        socket.emit("screen-share-stopped", { roomId, userId: userId.current });
+      }
+    } catch (error) {
+      console.error("❌ Screen share error:", error);
+      if (error.name !== "NotAllowedError") {
+        toast.error("Failed to share screen");
+      }
+    }
+  };
+
+  // Send offer to a participant
+  const sendOffer = async (pc, targetUserId) => {
+    try {
+      const offer = await pc.createOffer({
+        offerToReceiveAudio: true,
+        offerToReceiveVideo: true,
+      });
+      await pc.setLocalDescription(offer);
+
+      socket.emit("offer", {
+        offer: pc.localDescription,
+        to: targetUserId,
+        from: userId.current,
+      });
+
+      console.log(`📤 Sent offer to ${targetUserId}`);
+    } catch (error) {
+      console.error("❌ Error sending offer:", error);
+    }
+  };
 
   // Initialize and setup room
   useEffect(() => {
     let isMounted = true;
+    let cleanupTimeout;
 
     const setupRoom = async () => {
       if (!socket || !isConnected) {
-        console.log("Waiting for socket connection...");
+        console.log("⏳ Waiting for socket connection...");
         return;
       }
 
       try {
-        // Step 1: Initialize media
+        // Initialize media
         await initializeMedia();
         if (!isMounted) return;
 
-        // Step 2: Join room
-        console.log("Joining room:", roomId);
+        // Join room
+        console.log(`🚪 Joining room: ${roomId}`);
         socket.emit("join-room", {
           roomId,
           userId: userId.current,
           userName,
         });
 
-        // Step 3: Setup socket event handlers
+        // Setup socket event handlers
         const handlers = {
           "room-joined": ({ participants: existingParticipants }) => {
             if (!isMounted) return;
 
             console.log(
-              "Room joined, existing participants:",
-              existingParticipants
+              "✅ Room joined, existing participants:",
+              existingParticipants.length
             );
             setParticipants(existingParticipants);
 
             // Create connections with existing participants
-            existingParticipants.forEach((participant, index) => {
+            existingParticipants.forEach(async (participant, index) => {
               if (participant.userId !== userId.current) {
                 setTimeout(() => {
                   if (!isMounted) return;
                   const pc = createPeerConnection(participant.userId);
                   if (pc) {
-                    pc.createOffer()
-                      .then((offer) => pc.setLocalDescription(offer))
-                      .then(() => {
-                        socket.emit("offer", {
-                          offer: pc.localDescription,
-                          to: participant.userId,
-                          from: userId.current,
-                        });
-                      })
-                      .catch(console.error);
+                    sendOffer(pc, participant.userId);
                   }
-                }, index * 500);
+                }, index * 500); // Stagger connections
               }
             });
           },
@@ -334,27 +410,23 @@ const RoomPage = () => {
           "user-joined": (participant) => {
             if (!isMounted || participant.userId === userId.current) return;
 
+            console.log(`👤 New user joined: ${participant.userName}`);
             setParticipants((prev) => [...prev, participant]);
 
             // Create connection with new participant
-            const pc = createPeerConnection(participant.userId);
-            if (pc) {
-              pc.createOffer()
-                .then((offer) => pc.setLocalDescription(offer))
-                .then(() => {
-                  socket.emit("offer", {
-                    offer: pc.localDescription,
-                    to: participant.userId,
-                    from: userId.current,
-                  });
-                })
-                .catch(console.error);
-            }
+            setTimeout(() => {
+              if (!isMounted) return;
+              const pc = createPeerConnection(participant.userId);
+              if (pc) {
+                sendOffer(pc, participant.userId);
+              }
+            }, 500);
           },
 
           "user-left": ({ userId: leftUserId }) => {
             if (!isMounted) return;
 
+            console.log(`👋 User left: ${leftUserId}`);
             setParticipants((prev) =>
               prev.filter((p) => p.userId !== leftUserId)
             );
@@ -378,6 +450,7 @@ const RoomPage = () => {
           offer: async ({ offer, from }) => {
             if (!isMounted) return;
 
+            console.log(`📥 Received offer from ${from}`);
             let pc = peerConnections.get(from);
             if (!pc) {
               pc = createPeerConnection(from);
@@ -393,20 +466,24 @@ const RoomPage = () => {
                 to: from,
                 from: userId.current,
               });
+
+              console.log(`📤 Sent answer to ${from}`);
             } catch (error) {
-              console.error("Error handling offer:", error);
+              console.error("❌ Error handling offer:", error);
             }
           },
 
           answer: async ({ answer, from }) => {
+            console.log(`📥 Received answer from ${from}`);
             const pc = peerConnections.get(from);
             if (pc) {
               try {
                 await pc.setRemoteDescription(
                   new RTCSessionDescription(answer)
                 );
+                console.log(`✅ Set remote description from ${from}`);
               } catch (error) {
-                console.error("Error handling answer:", error);
+                console.error("❌ Error handling answer:", error);
               }
             }
           },
@@ -416,8 +493,9 @@ const RoomPage = () => {
             if (pc && candidate) {
               try {
                 await pc.addIceCandidate(new RTCIceCandidate(candidate));
+                console.log(`✅ Added ICE candidate from ${from}`);
               } catch (error) {
-                console.error("Error adding ICE candidate:", error);
+                console.error("❌ Error adding ICE candidate:", error);
               }
             }
           },
@@ -427,6 +505,40 @@ const RoomPage = () => {
               setMessages((prev) => [...prev, message]);
             }
           },
+
+          "screen-share-started": ({ userId: sharerId }) => {
+            setActiveScreenShare(sharerId);
+            if (sharerId !== userId.current) {
+              toast.info(
+                `${
+                  participants.find((p) => p.userId === sharerId)?.userName ||
+                  "Someone"
+                } started screen sharing`
+              );
+            }
+          },
+
+          "screen-share-stopped": ({ userId: sharerId }) => {
+            if (sharerId === activeScreenShare) {
+              setActiveScreenShare(null);
+            }
+          },
+
+          "video-toggled": ({ userId: targetUserId, enabled }) => {
+            setParticipants((prev) =>
+              prev.map((p) =>
+                p.userId === targetUserId ? { ...p, videoEnabled: enabled } : p
+              )
+            );
+          },
+
+          "audio-toggled": ({ userId: targetUserId, enabled }) => {
+            setParticipants((prev) =>
+              prev.map((p) =>
+                p.userId === targetUserId ? { ...p, audioEnabled: enabled } : p
+              )
+            );
+          },
         };
 
         // Attach all handlers
@@ -434,16 +546,39 @@ const RoomPage = () => {
           socket.on(event, handler);
         });
       } catch (error) {
-        console.error("Room setup error:", error);
+        console.error("❌ Room setup error:", error);
         toast.error("Failed to setup room");
       }
     };
 
     setupRoom();
 
+    // Schedule cleanup
+    cleanupTimeout = setTimeout(() => {
+      if (!isMounted) return;
+
+      // Check for stuck connections
+      const allParticipants = participants.length + 1;
+      if (allParticipants > 1 && remoteStreams.size === 0) {
+        console.log(
+          "🔄 No remote streams detected, attempting to reconnect..."
+        );
+        // Re-trigger connection setup
+        participants.forEach((participant) => {
+          if (participant.userId !== userId.current) {
+            const pc = createPeerConnection(participant.userId);
+            if (pc) {
+              sendOffer(pc, participant.userId);
+            }
+          }
+        });
+      }
+    }, 10000); // Check after 10 seconds
+
     // Cleanup
     return () => {
       isMounted = false;
+      clearTimeout(cleanupTimeout);
 
       // Remove socket listeners
       if (socket) {
@@ -454,6 +589,10 @@ const RoomPage = () => {
         socket.off("answer");
         socket.off("ice-candidate");
         socket.off("new-message");
+        socket.off("screen-share-started");
+        socket.off("screen-share-stopped");
+        socket.off("video-toggled");
+        socket.off("audio-toggled");
 
         socket.emit("leave-room", { roomId, userId: userId.current });
       }
@@ -464,8 +603,11 @@ const RoomPage = () => {
       });
 
       // Stop media tracks
-      if (localStream) {
-        localStream.getTracks().forEach((track) => track.stop());
+      if (localStreamRef.current) {
+        localStreamRef.current.getTracks().forEach((track) => track.stop());
+      }
+      if (screenStreamRef.current) {
+        screenStreamRef.current.getTracks().forEach((track) => track.stop());
       }
     };
   }, [
@@ -478,18 +620,18 @@ const RoomPage = () => {
   ]);
 
   // Control functions
-  const toggleVideo = async () => {
-    if (localStream) {
-      const videoTrack = localStream.getVideoTracks()[0];
+  const toggleVideo = () => {
+    if (localStreamRef.current) {
+      const videoTrack = localStreamRef.current.getVideoTracks()[0];
       if (videoTrack) {
         const newState = !videoTrack.enabled;
         videoTrack.enabled = newState;
         setIsVideoEnabled(newState);
 
-        // Update peer connections
+        // Update all peer connections
         peerConnections.forEach((pc) => {
           const sender = pc.getSenders().find((s) => s.track?.kind === "video");
-          if (sender) {
+          if (sender && videoTrack) {
             sender.replaceTrack(videoTrack);
           }
         });
@@ -502,23 +644,23 @@ const RoomPage = () => {
 
         toast.success(newState ? "Video enabled" : "Video disabled");
       } else if (!hasCameraAccess) {
-        toast.error("No camera available on this device");
+        toast.error("No camera available");
       }
     }
   };
 
-  const toggleAudio = async () => {
-    if (localStream) {
-      const audioTrack = localStream.getAudioTracks()[0];
+  const toggleAudio = () => {
+    if (localStreamRef.current) {
+      const audioTrack = localStreamRef.current.getAudioTracks()[0];
       if (audioTrack) {
         const newState = !audioTrack.enabled;
         audioTrack.enabled = newState;
         setIsAudioEnabled(newState);
 
-        // Update peer connections
+        // Update all peer connections
         peerConnections.forEach((pc) => {
           const sender = pc.getSenders().find((s) => s.track?.kind === "audio");
-          if (sender) {
+          if (sender && audioTrack) {
             sender.replaceTrack(audioTrack);
           }
         });
@@ -531,7 +673,7 @@ const RoomPage = () => {
 
         toast.success(newState ? "Audio enabled" : "Audio muted");
       } else if (!hasMicAccess) {
-        toast.error("No microphone available on this device");
+        toast.error("No microphone available");
       }
     }
   };
@@ -589,23 +731,17 @@ const RoomPage = () => {
             <h2 className="text-2xl font-bold text-white">
               Setting Up Meeting
             </h2>
-            <p className="text-gray-400">
-              Requesting camera and microphone access...
-            </p>
-            <p className="text-sm text-gray-500">
-              Please allow permissions in the browser popup
-            </p>
+            <p className="text-gray-400">Initializing video conference...</p>
+            <div className="flex items-center justify-center space-x-2">
+              <div className="w-2 h-2 bg-blue-500 rounded-full animate-pulse"></div>
+              <div className="w-2 h-2 bg-blue-500 rounded-full animate-pulse delay-150"></div>
+              <div className="w-2 h-2 bg-blue-500 rounded-full animate-pulse delay-300"></div>
+            </div>
           </div>
           <div className="pt-4 border-t border-gray-800">
             <p className="text-sm text-gray-500">
               Room: <span className="font-mono text-primary-400">{roomId}</span>
             </p>
-            <button
-              onClick={leaveRoom}
-              className="mt-4 px-6 py-2 bg-gray-800 hover:bg-gray-700 rounded-lg font-medium transition"
-            >
-              Cancel
-            </button>
           </div>
         </div>
       </div>
@@ -688,6 +824,33 @@ const RoomPage = () => {
           </div>
         </div>
 
+        {/* Screen Share Indicator */}
+        {activeScreenShare && (
+          <div className="fixed top-16 left-4 right-4 z-40 bg-yellow-500/10 border border-yellow-500/20 rounded-lg p-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center space-x-2">
+                <Share2 className="h-4 w-4 text-yellow-400" />
+                <span className="text-sm text-yellow-300">
+                  {activeScreenShare === userId.current
+                    ? "You are sharing your screen"
+                    : `${
+                        participants.find((p) => p.userId === activeScreenShare)
+                          ?.userName || "Someone"
+                      } is sharing screen`}
+                </span>
+              </div>
+              {activeScreenShare === userId.current && (
+                <button
+                  onClick={handleScreenShare}
+                  className="px-3 py-1 bg-yellow-600 hover:bg-yellow-700 rounded text-sm"
+                >
+                  Stop
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* Main Content */}
         <div className="pt-16 pb-24 px-2">
           <VideoGrid
@@ -698,65 +861,22 @@ const RoomPage = () => {
             userName={userName}
             connectionStatus={connectionStatus}
             isMobile={true}
+            activeScreenShare={activeScreenShare}
           />
 
-          {/* Mobile Status Bar */}
-          <div className="mt-4 p-3 bg-gray-900/80 rounded-lg border border-gray-800">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center space-x-3">
-                <div
-                  className={`p-2 rounded ${
-                    hasCameraAccess ? "bg-green-500/20" : "bg-red-500/20"
-                  }`}
-                >
-                  {hasCameraAccess ? (
-                    <Video
-                      className={`h-4 w-4 ${
-                        isVideoEnabled ? "text-green-400" : "text-red-400"
-                      }`}
-                    />
-                  ) : (
-                    <CameraOff className="h-4 w-4 text-red-400" />
-                  )}
-                </div>
-                <div
-                  className={`p-2 rounded ${
-                    hasMicAccess ? "bg-green-500/20" : "bg-red-500/20"
-                  }`}
-                >
-                  {hasMicAccess ? (
-                    <Mic
-                      className={`h-4 w-4 ${
-                        isAudioEnabled ? "text-green-400" : "text-red-400"
-                      }`}
-                    />
-                  ) : (
-                    <MicOff className="h-4 w-4 text-red-400" />
-                  )}
-                </div>
-                <div>
-                  <p className="text-xs text-gray-400">Status</p>
-                  <p className="text-sm font-medium">
-                    {connectionStatus === "connected"
-                      ? "Connected"
-                      : "Connecting..."}
-                  </p>
+          {/* Connection Status */}
+          {participants.length > 0 &&
+            remoteStreams.size < participants.length && (
+              <div className="mt-4 p-3 bg-blue-500/10 border border-blue-500/20 rounded-lg">
+                <div className="flex items-center space-x-3">
+                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-500"></div>
+                  <span className="text-blue-400 text-sm">
+                    Connecting to {participants.length - remoteStreams.size}{" "}
+                    participant(s)...
+                  </span>
                 </div>
               </div>
-              <button
-                onClick={() => setShowChat(!showChat)}
-                className="p-2 bg-primary-600 rounded-lg"
-                title="Chat"
-              >
-                <MessageSquare className="h-4 w-4" />
-                {messages.length > 0 && (
-                  <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full h-4 w-4 flex items-center justify-center">
-                    {messages.length}
-                  </span>
-                )}
-              </button>
-            </div>
-          </div>
+            )}
         </div>
 
         {/* Mobile Control Bar */}
@@ -773,7 +893,7 @@ const RoomPage = () => {
                 isVideoEnabled ? (
                   <Video className="h-5 w-5 text-green-400" />
                 ) : (
-                  <CameraOff className="h-5 w-5 text-white" />
+                  <VideoOff className="h-5 w-5 text-white" />
                 )
               ) : (
                 <CameraOff className="h-5 w-5 text-red-400" />
@@ -809,11 +929,32 @@ const RoomPage = () => {
             </button>
 
             <button
-              onClick={() => setShowParticipants(!showParticipants)}
-              className="flex flex-col items-center p-3 rounded-lg bg-gray-800 transition"
+              onClick={handleScreenShare}
+              className={`flex flex-col items-center p-3 rounded-lg transition ${
+                isScreenSharing ? "bg-blue-600" : "bg-gray-800"
+              }`}
             >
-              <Users className="h-5 w-5 text-purple-400" />
-              <span className="text-xs mt-1 text-gray-300">People</span>
+              <Share2
+                className={`h-5 w-5 ${
+                  isScreenSharing ? "text-white" : "text-blue-400"
+                }`}
+              />
+              <span className="text-xs mt-1 text-gray-300">
+                {isScreenSharing ? "Stop" : "Share"}
+              </span>
+            </button>
+
+            <button
+              onClick={() => setShowChat(!showChat)}
+              className="flex flex-col items-center p-3 rounded-lg bg-gray-800 transition relative"
+            >
+              <MessageSquare className="h-5 w-5 text-purple-400" />
+              <span className="text-xs mt-1 text-gray-300">Chat</span>
+              {messages.length > 0 && (
+                <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full h-4 w-4 flex items-center justify-center">
+                  {messages.length}
+                </span>
+              )}
             </button>
 
             <button
@@ -898,10 +1039,10 @@ const RoomPage = () => {
                     </span>
                     <span>•</span>
                     <span className="font-mono">{roomId}</span>
-                    {!hasCameraAccess && (
-                      <span className="text-yellow-500 flex items-center space-x-1">
-                        <CameraOff className="h-3 w-3" />
-                        <span>No Camera</span>
+                    {activeScreenShare && (
+                      <span className="flex items-center space-x-1 text-yellow-400">
+                        <Share2 className="h-3 w-3" />
+                        <span>Screen Sharing</span>
                       </span>
                     )}
                   </div>
@@ -916,7 +1057,7 @@ const RoomPage = () => {
                 title="Copy Room ID"
               >
                 <Copy className="h-4 w-4" />
-                <span className="hidden sm:inline">Copy ID</span>
+                <span>Copy ID</span>
               </button>
 
               <button
@@ -976,7 +1117,44 @@ const RoomPage = () => {
               userName={userName}
               connectionStatus={connectionStatus}
               isMobile={false}
+              activeScreenShare={activeScreenShare}
             />
+
+            {/* Connection Status */}
+            {participants.length > 0 &&
+              remoteStreams.size < participants.length && (
+                <div className="mt-4 p-4 bg-blue-500/10 border border-blue-500/20 rounded-lg">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center space-x-3">
+                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-500"></div>
+                      <span className="text-blue-400">
+                        Connecting to {participants.length - remoteStreams.size}{" "}
+                        participant(s)...
+                      </span>
+                    </div>
+                    <button
+                      onClick={() => {
+                        // Reconnect to all participants
+                        participants.forEach((participant) => {
+                          if (
+                            participant.userId !== userId.current &&
+                            !remoteStreams.has(participant.userId)
+                          ) {
+                            const pc = createPeerConnection(participant.userId);
+                            if (pc) {
+                              sendOffer(pc, participant.userId);
+                            }
+                          }
+                        });
+                        toast.info("Attempting to reconnect...");
+                      }}
+                      className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm"
+                    >
+                      Retry Connection
+                    </button>
+                  </div>
+                </div>
+              )}
 
             <ControlBar
               isVideoEnabled={isVideoEnabled && hasCameraAccess}
@@ -984,9 +1162,7 @@ const RoomPage = () => {
               isScreenSharing={isScreenSharing}
               onToggleVideo={toggleVideo}
               onToggleAudio={toggleAudio}
-              onToggleScreenShare={() =>
-                toast.info("Screen sharing coming soon")
-              }
+              onToggleScreenShare={handleScreenShare}
               onLeaveRoom={leaveRoom}
               onToggleFullscreen={toggleFullscreen}
               hasCameraAccess={hasCameraAccess}
