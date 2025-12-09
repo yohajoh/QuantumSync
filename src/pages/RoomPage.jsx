@@ -21,7 +21,6 @@ import {
   MicOff,
   Share2,
   ArrowLeft,
-  RefreshCw,
 } from "lucide-react";
 import toast from "react-hot-toast";
 
@@ -55,13 +54,13 @@ const RoomPage = () => {
   const [showPermissionOverlay, setShowPermissionOverlay] = useState(false);
   const [isJoiningMeeting, setIsJoiningMeeting] = useState(false);
   const [roomReady, setRoomReady] = useState(false);
-  const [isConnectingToPeers, setIsConnectingToPeers] = useState(false);
 
   // Store references
   const localStreamRef = useRef(null);
   const screenStreamRef = useRef(null);
   const isMountedRef = useRef(true);
-  const retryTimeoutRef = useRef(null);
+  const isReadyRef = useRef(false);
+  const pendingSignaling = useRef(new Map());
 
   // Check if mobile
   useEffect(() => {
@@ -84,41 +83,8 @@ const RoomPage = () => {
       isMountedRef.current = false;
       window.removeEventListener("resize", checkMobile);
       document.removeEventListener("fullscreenchange", handleFullscreenChange);
-
-      if (retryTimeoutRef.current) {
-        clearTimeout(retryTimeoutRef.current);
-      }
     };
   }, []);
-
-  // Debug logging
-  useEffect(() => {
-    console.log("=== DEBUG INFO ===");
-    console.log("Participants:", participants);
-    console.log(
-      "Remote streams:",
-      Array.from(remoteStreams.entries()).map(([id, stream]) => ({
-        id,
-        tracks: stream.getTracks().map((t) => `${t.kind}:${t.enabled}`),
-      }))
-    );
-    console.log(
-      "Peer connections:",
-      Array.from(peerConnections.entries()).map(([id, pc]) => ({
-        id,
-        connectionState: pc.connectionState,
-        iceState: pc.iceConnectionState,
-        signalingState: pc.signalingState,
-      }))
-    );
-    console.log(
-      "Local stream:",
-      localStream
-        ? localStream.getTracks().map((t) => `${t.kind}:${t.enabled}`)
-        : null
-    );
-    console.log("=================");
-  }, [participants, remoteStreams, peerConnections, localStream]);
 
   // WebRTC configuration
   const configuration = {
@@ -164,6 +130,24 @@ const RoomPage = () => {
       localStreamRef.current = stream;
       setConnectionStatus("connected");
 
+      // Add tracks to existing peer connections if any
+      peerConnections.forEach((pc) => {
+        if (pc.connectionState !== "closed") {
+          stream.getTracks().forEach((track) => {
+            const sender = pc
+              .getSenders()
+              .find((s) => s.track?.kind === track.kind);
+            if (!sender) {
+              try {
+                pc.addTrack(track, stream);
+              } catch (err) {
+                console.warn("Failed to add track:", err);
+              }
+            }
+          });
+        }
+      });
+
       toast.success("Camera and microphone ready!");
       return stream;
     } catch (error) {
@@ -185,7 +169,7 @@ const RoomPage = () => {
         return null;
       }
     }
-  }, [isVideoEnabled, isAudioEnabled]);
+  }, [isVideoEnabled, isAudioEnabled, peerConnections]);
 
   // Create peer connection
   const createPeerConnection = useCallback(
@@ -194,72 +178,31 @@ const RoomPage = () => {
         // Close existing connection if any
         const existingPc = peerConnections.get(targetUserId);
         if (existingPc) {
-          console.log(`Closing existing connection with ${targetUserId}`);
           existingPc.close();
         }
 
         const pc = new RTCPeerConnection(configuration);
 
         // Handle negotiation needed
-        pc.onnegotiationneeded = async () => {
+        pc.onnegotiationneeded = () => {
           console.log(`Negotiation needed with ${targetUserId}`);
-          if (pc.signalingState !== "stable") {
-            console.log("Signaling state not stable, skipping negotiation");
-            return;
-          }
-
-          try {
-            const offer = await pc.createOffer({
-              offerToReceiveAudio: true,
-              offerToReceiveVideo: true,
-            });
-            await pc.setLocalDescription(offer);
-
-            if (socket?.connected) {
-              socket.emit("offer", {
-                offer: pc.localDescription,
-                to: targetUserId,
-                from: userId.current,
-              });
-            }
-          } catch (error) {
-            console.error("Error creating offer:", error);
-          }
+          sendOffer(pc, targetUserId);
         };
 
         // Add local tracks if available
-        const addLocalTracks = () => {
-          if (localStreamRef.current) {
-            const tracks = localStreamRef.current.getTracks();
-            console.log(
-              `Adding ${tracks.length} local tracks to ${targetUserId}`
-            );
+        if (localStreamRef.current) {
+          localStreamRef.current.getTracks().forEach((track) => {
+            if (track.kind === "video" && !isVideoEnabled && !isScreenSharing)
+              return;
+            if (track.kind === "audio" && !isAudioEnabled) return;
 
-            tracks.forEach((track) => {
-              if (track.kind === "video" && !isVideoEnabled && !isScreenSharing)
-                return;
-              if (track.kind === "audio" && !isAudioEnabled) return;
-
-              try {
-                // Check if track already exists
-                const existingSender = pc
-                  .getSenders()
-                  .find((s) => s.track && s.track.kind === track.kind);
-
-                if (!existingSender) {
-                  console.log(`Adding ${track.kind} track to ${targetUserId}`);
-                  pc.addTrack(track, localStreamRef.current);
-                } else {
-                  console.log(
-                    `${track.kind} track already exists for ${targetUserId}`
-                  );
-                }
-              } catch (err) {
-                console.warn(`Failed to add ${track.kind} track:`, err);
-              }
-            });
-          }
-        };
+            try {
+              pc.addTrack(track, localStreamRef.current);
+            } catch (err) {
+              console.warn(`Failed to add ${track.kind} track:`, err);
+            }
+          });
+        }
 
         // Handle remote tracks
         pc.ontrack = (event) => {
@@ -270,7 +213,6 @@ const RoomPage = () => {
               newMap.set(targetUserId, event.streams[0]);
               return newMap;
             });
-            toast.success(`Connected to ${targetUserId}`);
           }
         };
 
@@ -292,34 +234,21 @@ const RoomPage = () => {
 
           if (state === "connected" || state === "completed") {
             console.log(`✅ Connected to ${targetUserId}`);
-            // Add tracks after connection is established
-            setTimeout(() => addLocalTracks(), 100);
-          } else if (state === "failed" || state === "disconnected") {
-            console.log(`❌ Connection ${state} with ${targetUserId}`);
-
-            // Retry connection after delay
-            retryTimeoutRef.current = setTimeout(() => {
-              if (
-                isMountedRef.current &&
-                participants.some((p) => p.userId === targetUserId)
-              ) {
-                console.log(`Retrying connection with ${targetUserId}`);
+          } else if (state === "failed") {
+            console.log(
+              `❌ Connection failed with ${targetUserId}, restarting ICE...`
+            );
+            // Try to restart ICE
+            setTimeout(() => {
+              if (isMountedRef.current && peerConnections.has(targetUserId)) {
                 const newPc = createPeerConnection(targetUserId);
                 if (newPc) {
-                  // Trigger new offer after a delay
-                  setTimeout(() => {
-                    if (newPc.signalingState === "stable") {
-                      newPc.onnegotiationneeded();
-                    }
-                  }, 1000);
+                  sendOffer(newPc, targetUserId);
                 }
               }
-            }, 2000);
+            }, 1000);
           }
         };
-
-        // Add initial tracks
-        addLocalTracks();
 
         // Store connection
         setPeerConnections((prev) => {
@@ -328,7 +257,6 @@ const RoomPage = () => {
           return newMap;
         });
 
-        console.log(`Created peer connection with ${targetUserId}`);
         return pc;
       } catch (error) {
         console.error("Failed to create peer connection:", error);
@@ -341,43 +269,41 @@ const RoomPage = () => {
       isVideoEnabled,
       isAudioEnabled,
       isScreenSharing,
-      participants,
+      peerConnections,
     ]
   );
 
-  // Connect to all participants
-  const connectToAllParticipants = useCallback(() => {
-    if (!isMountedRef.current) return;
+  // Send offer to a participant
+  const sendOffer = async (pc, targetUserId) => {
+    try {
+      const offer = await pc.createOffer({
+        offerToReceiveAudio: true,
+        offerToReceiveVideo: true,
+      });
+      await pc.setLocalDescription(offer);
 
-    console.log("Connecting to all participants...");
-    setIsConnectingToPeers(true);
+      socket.emit("offer", {
+        offer: pc.localDescription,
+        to: targetUserId,
+        from: userId.current,
+      });
+    } catch (error) {
+      console.error("Error sending offer:", error);
+    }
+  };
 
-    const otherParticipants = participants.filter(
-      (p) => p.userId !== userId.current
-    );
-
-    otherParticipants.forEach((participant, index) => {
-      setTimeout(() => {
-        if (!isMountedRef.current) return;
-
-        console.log(`Creating connection with ${participant.userId}`);
-        const pc = createPeerConnection(participant.userId);
-
+  // Connect to user with ID comparison
+  const connectToUser = useCallback(
+    (targetUserId) => {
+      if (userId.current < targetUserId) {
+        const pc = createPeerConnection(targetUserId);
         if (pc) {
-          // Trigger offer after a short delay
-          setTimeout(() => {
-            if (pc.signalingState === "stable") {
-              pc.onnegotiationneeded();
-            }
-          }, 500 + index * 1000);
+          // The onnegotiationneeded will trigger sendOffer
         }
-      }, index * 500);
-    });
-
-    setTimeout(() => {
-      setIsConnectingToPeers(false);
-    }, otherParticipants.length * 1500);
-  }, [participants, createPeerConnection]);
+      }
+    },
+    [createPeerConnection]
+  );
 
   // Setup socket and room
   useEffect(() => {
@@ -417,19 +343,7 @@ const RoomPage = () => {
         return [...prev, participant];
       });
 
-      // Create connection with new user
-      if (isJoiningMeeting) {
-        setTimeout(() => {
-          const pc = createPeerConnection(participant.userId);
-          if (pc) {
-            setTimeout(() => {
-              if (pc.signalingState === "stable") {
-                pc.onnegotiationneeded();
-              }
-            }, 500);
-          }
-        }, 1000);
-      }
+      connectToUser(participant.userId);
     };
 
     const handleUserLeft = ({ userId: leftUserId }) => {
@@ -455,48 +369,24 @@ const RoomPage = () => {
     };
 
     const handleOffer = async ({ offer, from }) => {
-      if (!isMountedRef.current || from === userId.current) return;
+      if (!isMountedRef.current) return;
+
+      if (!isReadyRef.current) {
+        const queue = pendingSignaling.current.get(from) || [];
+        queue.push({ type: "offer", data: { offer, from } });
+        pendingSignaling.current.set(from, queue);
+        return;
+      }
 
       console.log(`Received offer from ${from}`);
+      let pc = peerConnections.get(from);
+      if (!pc) {
+        pc = createPeerConnection(from);
+      }
 
       try {
-        let pc = peerConnections.get(from);
-        if (!pc) {
-          pc = createPeerConnection(from);
-        }
-
-        // Wait for PC to be ready
-        await new Promise((resolve) => setTimeout(resolve, 100));
-
-        if (pc.signalingState !== "stable") {
-          console.log("PC not stable, waiting...");
-          await new Promise((resolve) => setTimeout(resolve, 200));
-        }
-
         await pc.setRemoteDescription(new RTCSessionDescription(offer));
-
-        // Add local tracks if we have them
-        if (localStreamRef.current) {
-          localStreamRef.current.getTracks().forEach((track) => {
-            try {
-              const existingSender = pc
-                .getSenders()
-                .find((s) => s.track && s.track.kind === track.kind);
-
-              if (!existingSender) {
-                pc.addTrack(track, localStreamRef.current);
-              }
-            } catch (err) {
-              console.warn("Error adding track in handleOffer:", err);
-            }
-          });
-        }
-
-        const answer = await pc.createAnswer({
-          offerToReceiveAudio: true,
-          offerToReceiveVideo: true,
-        });
-
+        const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
 
         socket.emit("answer", {
@@ -510,17 +400,18 @@ const RoomPage = () => {
     };
 
     const handleAnswer = async ({ answer, from }) => {
+      if (!isReadyRef.current) {
+        const queue = pendingSignaling.current.get(from) || [];
+        queue.push({ type: "answer", data: { answer, from } });
+        pendingSignaling.current.set(from, queue);
+        return;
+      }
+
       console.log(`Received answer from ${from}`);
       const pc = peerConnections.get(from);
       if (pc) {
         try {
-          if (pc.signalingState !== "have-local-offer") {
-            console.log("Unexpected signaling state:", pc.signalingState);
-            return;
-          }
-
           await pc.setRemoteDescription(new RTCSessionDescription(answer));
-          console.log(`✅ Answer accepted from ${from}`);
         } catch (error) {
           console.error("Error handling answer:", error);
         }
@@ -528,11 +419,17 @@ const RoomPage = () => {
     };
 
     const handleIceCandidate = async ({ candidate, from }) => {
+      if (!isReadyRef.current) {
+        const queue = pendingSignaling.current.get(from) || [];
+        queue.push({ type: "candidate", data: { candidate, from } });
+        pendingSignaling.current.set(from, queue);
+        return;
+      }
+
       const pc = peerConnections.get(from);
       if (pc && candidate) {
         try {
           await pc.addIceCandidate(new RTCIceCandidate(candidate));
-          console.log(`Added ICE candidate from ${from}`);
         } catch (error) {
           console.error("Error adding ICE candidate:", error);
         }
@@ -580,57 +477,44 @@ const RoomPage = () => {
       if (screenStreamRef.current) {
         screenStreamRef.current.getTracks().forEach((track) => track.stop());
       }
-
-      if (retryTimeoutRef.current) {
-        clearTimeout(retryTimeoutRef.current);
-      }
     };
-  }, [
-    socket,
-    isConnected,
-    roomId,
-    userName,
-    isJoiningMeeting,
-    createPeerConnection,
-  ]);
+  }, [socket, isConnected, roomId, userName, connectToUser]);
 
   // Handle permission decision
   const handlePermissionDecision = async (allowCamera) => {
     setShowPermissionOverlay(false);
-    setIsJoiningMeeting(true);
 
-    let stream = null;
     if (allowCamera) {
-      stream = await initializeMedia();
+      await initializeMedia();
     } else {
       setHasCameraAccess(false);
       setHasMicAccess(false);
       setConnectionStatus("connected");
     }
 
-    // Wait a bit then connect to participants
-    setTimeout(() => {
-      connectToAllParticipants();
-    }, 1000);
-  };
+    isReadyRef.current = true;
+    setIsJoiningMeeting(true);
 
-  // Retry all connections
-  const retryAllConnections = () => {
-    console.log("Retrying all connections...");
-    setIsConnectingToPeers(true);
-
-    // Cleanup existing connections
-    peerConnections.forEach((pc, id) => {
-      if (pc) pc.close();
+    // Process pending signaling
+    pendingSignaling.current.forEach((queue, fromId) => {
+      queue.forEach((item) => {
+        if (item.type === "offer") {
+          handleOffer(item.data);
+        } else if (item.type === "answer") {
+          handleAnswer(item.data);
+        } else if (item.type === "candidate") {
+          handleIceCandidate(item.data);
+        }
+      });
     });
+    pendingSignaling.current.clear();
 
-    setPeerConnections(new Map());
-    setRemoteStreams(new Map());
-
-    // Reconnect to all participants
-    setTimeout(() => {
-      connectToAllParticipants();
-    }, 500);
+    // Connect to existing participants
+    participants.forEach((participant) => {
+      if (participant.userId !== userId.current) {
+        connectToUser(participant.userId);
+      }
+    });
   };
 
   // Control functions
@@ -646,7 +530,6 @@ const RoomPage = () => {
       videoTrack.enabled = newState;
       setIsVideoEnabled(newState);
 
-      // Update all peer connections
       peerConnections.forEach((pc) => {
         const sender = pc.getSenders().find((s) => s.track?.kind === "video");
         if (sender && videoTrack) {
@@ -672,7 +555,6 @@ const RoomPage = () => {
       audioTrack.enabled = newState;
       setIsAudioEnabled(newState);
 
-      // Update all peer connections
       peerConnections.forEach((pc) => {
         const sender = pc.getSenders().find((s) => s.track?.kind === "audio");
         if (sender && audioTrack) {
@@ -690,10 +572,7 @@ const RoomPage = () => {
     try {
       if (!isScreenSharing) {
         const screenStream = await navigator.mediaDevices.getDisplayMedia({
-          video: {
-            cursor: "always",
-            displaySurface: "monitor",
-          },
+          video: true,
           audio: false,
         });
 
@@ -702,14 +581,12 @@ const RoomPage = () => {
         setActiveScreenShare(userId.current);
 
         const screenTrack = screenStream.getVideoTracks()[0];
-
-        // Replace video track with screen share track in all connections
         peerConnections.forEach((pc) => {
           const sender = pc.getSenders().find((s) => s.track?.kind === "video");
           if (sender && screenTrack) {
             sender.replaceTrack(screenTrack);
           } else if (screenTrack) {
-            pc.addTrack(screenTrack, screenStream);
+            pc.addTrack(screenTrack, screenStreamRef.current);
           }
         });
 
@@ -838,37 +715,6 @@ const RoomPage = () => {
 
   // Show meeting room
   if (isJoiningMeeting) {
-    // Show connecting overlay
-    if (isConnectingToPeers && participants.length > 0) {
-      return (
-        <div className="min-h-screen bg-gray-950 flex items-center justify-center p-4">
-          <div className="text-center space-y-6 max-w-md">
-            <div className="relative">
-              <div className="w-24 h-24 mx-auto border-4 border-primary-500/30 border-t-primary-500 rounded-full animate-spin"></div>
-              <div className="absolute inset-0 flex items-center justify-center">
-                <Users className="h-12 w-12 text-primary-500" />
-              </div>
-            </div>
-            <div className="space-y-3">
-              <h2 className="text-2xl font-bold text-white">
-                Connecting to participants...
-              </h2>
-              <p className="text-gray-400">
-                Connecting to {participants.length} participant(s)
-              </p>
-              <button
-                onClick={retryAllConnections}
-                className="inline-flex items-center space-x-2 px-4 py-2 bg-gray-800 hover:bg-gray-700 rounded-lg transition"
-              >
-                <RefreshCw className="h-4 w-4" />
-                <span>Retry Connections</span>
-              </button>
-            </div>
-          </div>
-        </div>
-      );
-    }
-
     // Mobile layout
     if (isMobile) {
       return (
@@ -915,7 +761,6 @@ const RoomPage = () => {
               connectionStatus={connectionStatus}
               isMobile={true}
               activeScreenShare={activeScreenShare}
-              peerConnections={peerConnections}
             />
           </div>
 
@@ -1100,15 +945,6 @@ const RoomPage = () => {
 
               <div className="flex items-center space-x-3">
                 <button
-                  onClick={retryAllConnections}
-                  className="flex items-center space-x-2 px-4 py-2 bg-gray-800 hover:bg-gray-700 rounded-lg transition"
-                  title="Retry Connections"
-                >
-                  <RefreshCw className="h-4 w-4" />
-                  <span>Retry</span>
-                </button>
-
-                <button
                   onClick={copyRoomId}
                   className="flex items-center space-x-2 px-4 py-2 bg-gray-800 hover:bg-gray-700 rounded-lg transition"
                   title="Copy Room ID"
@@ -1175,7 +1011,6 @@ const RoomPage = () => {
                 connectionStatus={connectionStatus}
                 isMobile={false}
                 activeScreenShare={activeScreenShare}
-                peerConnections={peerConnections}
               />
 
               <ControlBar
@@ -1189,7 +1024,6 @@ const RoomPage = () => {
                 onToggleFullscreen={toggleFullscreen}
                 hasCameraAccess={hasCameraAccess}
                 hasMicAccess={hasMicAccess}
-                onRetryConnections={retryAllConnections}
               />
             </div>
 
