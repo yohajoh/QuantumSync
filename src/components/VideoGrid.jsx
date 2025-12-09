@@ -21,7 +21,7 @@ const VideoGrid = ({
   const remoteVideoRefs = useRef(new Map());
   const [isMobile, setIsMobile] = useState(false);
 
-  // Check if mobile
+  // Check mobile
   useEffect(() => {
     const checkMobile = () => setIsMobile(window.innerWidth < 768);
     checkMobile();
@@ -29,13 +29,13 @@ const VideoGrid = ({
     return () => window.removeEventListener("resize", checkMobile);
   }, []);
 
-  // Handle local video stream - CRITICAL FIX for "vibrating"
+  // Handle local video - SINGLE initialization
   useEffect(() => {
     if (localVideoRef.current && localStream) {
       console.log("Setting local video stream");
       localVideoRef.current.srcObject = localStream;
 
-      // Prevent multiple tracks causing vibration
+      // Ensure video track is properly enabled/disabled
       const videoTrack = localStream.getVideoTracks()[0];
       if (videoTrack) {
         videoTrack.enabled = isVideoEnabled;
@@ -43,31 +43,15 @@ const VideoGrid = ({
     }
   }, [localStream, isVideoEnabled]);
 
-  // Handle remote video streams - CRITICAL FIX for "vibrating"
+  // Handle remote videos - Efficient updates
   useEffect(() => {
-    const updateRemoteVideos = () => {
-      remoteStreams.forEach((stream, userId) => {
-        const videoElement = remoteVideoRefs.current.get(userId);
-        if (videoElement && stream) {
-          // Check if we already have this stream
-          if (videoElement.srcObject !== stream) {
-            console.log(`Setting remote video for ${userId}`);
-            videoElement.srcObject = stream;
-          }
-
-          // Ensure only one video track is active
-          const videoTracks = stream.getVideoTracks();
-          if (videoTracks.length > 1) {
-            console.warn(`Multiple video tracks for ${userId}, keeping first`);
-            for (let i = 1; i < videoTracks.length; i++) {
-              videoTracks[i].stop();
-            }
-          }
-        }
-      });
-    };
-
-    updateRemoteVideos();
+    remoteStreams.forEach((stream, userId) => {
+      const videoElement = remoteVideoRefs.current.get(userId);
+      if (videoElement && stream && videoElement.srcObject !== stream) {
+        console.log(`Setting remote video for ${userId}`);
+        videoElement.srcObject = stream;
+      }
+    });
   }, [remoteStreams]);
 
   const allParticipants = [
@@ -86,81 +70,61 @@ const VideoGrid = ({
     })),
   ];
 
-  // Calculate responsive grid
+  // Responsive grid calculation
   const getGridClass = (count) => {
-    if (isMobile) return "grid-cols-1 gap-2";
+    if (isMobile) return "grid-cols-1 gap-3";
 
     switch (count) {
       case 1:
-        return "grid-cols-1 gap-4";
+        return "grid-cols-1";
       case 2:
-        return "grid-cols-2 gap-4";
+        return "grid-cols-2";
       case 3:
-        return "grid-cols-2 lg:grid-cols-3 gap-4";
+        return "grid-cols-2 lg:grid-cols-3";
       case 4:
-        return "grid-cols-2 lg:grid-cols-2 xl:grid-cols-4 gap-3";
+        return "grid-cols-2 lg:grid-cols-4";
       default:
-        return "grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3";
+        return "grid-cols-2 lg:grid-cols-3 xl:grid-cols-4";
     }
-  };
-
-  const getVideoSize = (count) => {
-    if (isMobile) return "aspect-[4/3]";
-    if (count <= 2) return "aspect-video";
-    if (count <= 4) return "aspect-[4/3]";
-    return "aspect-square";
   };
 
   return (
     <div className="w-full">
-      {/* Connection Status */}
-      {connectionStatus === "connecting" && (
-        <div className="mb-4 p-4 bg-blue-500/10 border border-blue-500/20 rounded-lg">
-          <div className="flex items-center justify-center space-x-3">
-            <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-500"></div>
-            <span className="text-blue-400 font-medium">
-              Connecting to participants...
-            </span>
-          </div>
-        </div>
-      )}
-
       {/* Video Grid */}
-      <div className={`grid ${getGridClass(allParticipants.length)}`}>
+      <div className={`grid ${getGridClass(allParticipants.length)} gap-4`}>
         {allParticipants.map((participant) => {
           const hasStream =
             participant.stream && participant.stream.getTracks().length > 0;
-          const videoTrack = hasStream
-            ? participant.stream.getVideoTracks()[0]
-            : null;
           const isConnecting = !hasStream && !participant.isLocal;
 
           return (
             <div
               key={participant.userId}
-              className={`relative ${getVideoSize(
-                allParticipants.length
-              )} bg-gray-900 rounded-xl overflow-hidden border ${
+              className={`relative aspect-video bg-gray-900 rounded-xl overflow-hidden border ${
                 isConnecting
-                  ? "border-yellow-500/30"
+                  ? "border-yellow-500/30 animate-pulse"
                   : participant.isLocal
                   ? "border-primary-500/30"
                   : "border-gray-800"
-              } ${isConnecting ? "animate-pulse" : ""}`}
+              }`}
             >
-              {/* Video Element */}
+              {/* Video Container */}
               <div className="absolute inset-0 bg-gray-950">
-                {hasStream && videoTrack ? (
+                {hasStream ? (
                   <video
                     ref={
                       participant.isLocal
                         ? localVideoRef
                         : (el) => {
-                            if (el)
+                            if (
+                              el &&
+                              !remoteVideoRefs.current.has(participant.userId)
+                            ) {
                               remoteVideoRefs.current.set(
                                 participant.userId,
                                 el
                               );
+                            }
                           }
                     }
                     autoPlay
@@ -168,16 +132,8 @@ const VideoGrid = ({
                     muted={participant.isLocal}
                     className="w-full h-full object-cover"
                     onLoadedData={() =>
-                      console.log(`${participant.userId} video loaded`)
+                      console.log(`${participant.userName} video loaded`)
                     }
-                    onError={(e) =>
-                      console.error(`${participant.userId} video error:`, e)
-                    }
-                    // Prevent multiple video elements causing vibration
-                    style={{
-                      transform: "translateZ(0)",
-                      backfaceVisibility: "hidden",
-                    }}
                   />
                 ) : (
                   <div className="w-full h-full flex items-center justify-center">
@@ -189,24 +145,16 @@ const VideoGrid = ({
                         </div>
                       </div>
                     ) : (
-                      <div
-                        className={`${
-                          isMobile ? "w-16 h-16" : "w-20 h-20"
-                        } rounded-full bg-gray-800 flex items-center justify-center`}
-                      >
-                        <User
-                          className={`${
-                            isMobile ? "h-8 w-8" : "h-10 w-10"
-                          } text-gray-600`}
-                        />
+                      <div className="w-20 h-20 rounded-full bg-gray-800 flex items-center justify-center">
+                        <User className="h-10 w-10 text-gray-600" />
                       </div>
                     )}
                   </div>
                 )}
               </div>
 
-              {/* Participant Info */}
-              <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/90 via-black/50 to-transparent p-2 sm:p-3">
+              {/* Participant Info Overlay */}
+              <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/90 via-black/50 to-transparent p-3">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center space-x-2">
                     <div className="flex items-center space-x-1">
@@ -221,7 +169,7 @@ const VideoGrid = ({
                         <VideoOff className="h-3 w-3 text-red-400" />
                       )}
                     </div>
-                    <span className="text-xs sm:text-sm font-medium text-white truncate max-w-[80px] sm:max-w-[120px]">
+                    <span className="text-sm font-medium text-white truncate max-w-[120px]">
                       {participant.userName}
                     </span>
                   </div>
@@ -233,8 +181,8 @@ const VideoGrid = ({
                 </div>
               </div>
 
-              {/* Status Indicator */}
-              <div className="absolute top-2 right-2">
+              {/* Connection Status */}
+              <div className="absolute top-3 right-3">
                 <div className="flex items-center space-x-1 bg-black/50 backdrop-blur-sm rounded-full px-2 py-1">
                   {hasStream ? (
                     <>
@@ -243,7 +191,7 @@ const VideoGrid = ({
                     </>
                   ) : isConnecting ? (
                     <>
-                      <div className="w-2 h-2 bg-yellow-500 rounded-full"></div>
+                      <div className="w-2 h-2 bg-yellow-500 rounded-full animate-pulse"></div>
                       <span className="text-xs text-yellow-400">
                         Connecting
                       </span>
