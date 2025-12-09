@@ -57,7 +57,6 @@ const RoomPage = () => {
   const localStreamRef = useRef(null);
   const screenStreamRef = useRef(null);
   const isMountedRef = useRef(true);
-  const pendingOffersRef = useRef(new Map()); // Track pending offers
 
   // Check if mobile
   useEffect(() => {
@@ -83,23 +82,14 @@ const RoomPage = () => {
     };
   }, []);
 
-  // WebRTC configuration
-  const configuration = {
-    iceServers: [
-      { urls: "stun:stun.l.google.com:19302" },
-      { urls: "stun:stun1.l.google.com:19302" },
-      { urls: "stun:stun2.l.google.com:19302" },
-    ],
-    iceCandidatePoolSize: 10,
-  };
-
   // Initialize media
   const initializeMedia = useCallback(
     async (skipPermission = false) => {
       if (skipPermission) {
+        // Join without media
         setHasCameraAccess(false);
         setHasMicAccess(false);
-        setConnectionStatus("connected-no-media");
+        setConnectionStatus("connected");
         setIsJoiningMeeting(true);
         return null;
       }
@@ -146,6 +136,7 @@ const RoomPage = () => {
           error.name === "NotAllowedError" ||
           error.name === "PermissionDeniedError"
         ) {
+          // Show permission overlay
           setShowPermissionOverlay(true);
           setConnectionStatus("permission-denied");
           return null;
@@ -159,17 +150,34 @@ const RoomPage = () => {
     [isVideoEnabled, isAudioEnabled]
   );
 
-  // Create peer connection for a specific user
+  // Handle permission decision
+  const handlePermissionDecision = async (allowCamera) => {
+    setShowPermissionOverlay(false);
+
+    if (allowCamera) {
+      await initializeMedia(false);
+    } else {
+      await initializeMedia(true);
+      toast.info("Joining meeting without camera/microphone");
+    }
+  };
+
+  // Create peer connection
   const createPeerConnection = useCallback(
     (targetUserId) => {
       try {
-        // Close existing connection if any
         const existingPc = peerConnections.get(targetUserId);
         if (existingPc) {
           existingPc.close();
         }
 
-        const pc = new RTCPeerConnection(configuration);
+        const pc = new RTCPeerConnection({
+          iceServers: [
+            { urls: "stun:stun.l.google.com:19302" },
+            { urls: "stun:stun1.l.google.com:19302" },
+            { urls: "stun:stun2.l.google.com:19302" },
+          ],
+        });
 
         // Add local tracks if available
         if (localStreamRef.current) {
@@ -181,7 +189,7 @@ const RoomPage = () => {
             try {
               pc.addTrack(track, localStreamRef.current);
             } catch (err) {
-              console.warn(`Failed to add ${track.kind} track:`, err);
+              console.warn(`Failed to add track:`, err);
             }
           });
         }
@@ -208,45 +216,6 @@ const RoomPage = () => {
           }
         };
 
-        // Connection state monitoring
-        pc.oniceconnectionstatechange = () => {
-          const state = pc.iceConnectionState;
-          if (state === "connected" || state === "completed") {
-            console.log(`✅ Connected to ${targetUserId}`);
-          } else if (state === "failed" || state === "disconnected") {
-            console.log(`⚠️ Connection issue with ${targetUserId}:`, state);
-
-            // Try to restart ICE
-            setTimeout(() => {
-              if (
-                isMountedRef.current &&
-                peerConnections.has(targetUserId) &&
-                pc.iceConnectionState !== "connected" &&
-                pc.iceConnectionState !== "checking"
-              ) {
-                console.log(`🔄 Restarting ICE for ${targetUserId}`);
-                pc.restartIce();
-              }
-            }, 1000);
-          }
-        };
-
-        pc.onnegotiationneeded = async () => {
-          try {
-            console.log(`🤝 Negotiation needed with ${targetUserId}`);
-            const offer = await pc.createOffer();
-            await pc.setLocalDescription(offer);
-
-            socket.emit("offer", {
-              offer: pc.localDescription,
-              to: targetUserId,
-              from: userId.current,
-            });
-          } catch (error) {
-            console.error("Negotiation error:", error);
-          }
-        };
-
         // Store connection
         setPeerConnections((prev) => {
           const newMap = new Map(prev);
@@ -260,39 +229,16 @@ const RoomPage = () => {
         return null;
       }
     },
-    [
-      socket,
-      configuration,
-      isVideoEnabled,
-      isAudioEnabled,
-      isScreenSharing,
-      peerConnections,
-    ]
+    [socket, peerConnections, isVideoEnabled, isAudioEnabled, isScreenSharing]
   );
 
   // Send offer to a participant
-  const sendOffer = async (targetUserId) => {
+  const sendOffer = async (pc, targetUserId) => {
     try {
-      let pc = peerConnections.get(targetUserId);
-      if (!pc) {
-        pc = createPeerConnection(targetUserId);
-      }
-
-      if (!pc) return;
-
-      // If there's a pending offer, wait a bit
-      if (pendingOffersRef.current.get(targetUserId)) {
-        setTimeout(() => sendOffer(targetUserId), 500);
-        return;
-      }
-
-      pendingOffersRef.current.set(targetUserId, true);
-
       const offer = await pc.createOffer({
         offerToReceiveAudio: true,
         offerToReceiveVideo: true,
       });
-
       await pc.setLocalDescription(offer);
 
       socket.emit("offer", {
@@ -300,14 +246,8 @@ const RoomPage = () => {
         to: targetUserId,
         from: userId.current,
       });
-
-      // Clear pending flag after 2 seconds
-      setTimeout(() => {
-        pendingOffersRef.current.delete(targetUserId);
-      }, 2000);
     } catch (error) {
       console.error("Error sending offer:", error);
-      pendingOffersRef.current.delete(targetUserId);
     }
   };
 
@@ -372,21 +312,12 @@ const RoomPage = () => {
     }
   };
 
-  // Handle permission decision
-  const handlePermissionDecision = async (allowCamera) => {
-    setShowPermissionOverlay(false);
-
-    if (allowCamera) {
-      await initializeMedia(false);
-    } else {
-      await initializeMedia(true);
-      toast.info("Joining meeting without camera/microphone");
-    }
-  };
-
-  // Setup socket events and join room
+  // Setup socket connection and room join
   useEffect(() => {
-    if (!socket || !isConnected) return;
+    if (!socket || !isConnected) {
+      console.log("Waiting for socket connection...");
+      return;
+    }
 
     console.log(`Joining room: ${roomId}`);
     socket.emit("join-room", {
@@ -405,12 +336,20 @@ const RoomPage = () => {
       );
       setParticipants(existingParticipants);
 
-      // Create connections with all existing participants
+      // Show permission overlay if not already joining
+      if (!isJoiningMeeting) {
+        setShowPermissionOverlay(true);
+      }
+
+      // Create connections with existing participants
       existingParticipants.forEach((participant, index) => {
         if (participant.userId !== userId.current) {
           setTimeout(() => {
             if (!isMountedRef.current) return;
-            sendOffer(participant.userId);
+            const pc = createPeerConnection(participant.userId);
+            if (pc) {
+              sendOffer(pc, participant.userId);
+            }
           }, index * 300);
         }
       });
@@ -427,8 +366,14 @@ const RoomPage = () => {
         return [...prev, participant];
       });
 
-      // New participant should initiate connection to us
-      // We'll wait for them to send us an offer
+      // Create connection with new participant
+      setTimeout(() => {
+        if (!isMountedRef.current) return;
+        const pc = createPeerConnection(participant.userId);
+        if (pc) {
+          sendOffer(pc, participant.userId);
+        }
+      }, 300);
     };
 
     const handleUserLeft = ({ userId: leftUserId }) => {
@@ -437,7 +382,7 @@ const RoomPage = () => {
       console.log(`User left: ${leftUserId}`);
       setParticipants((prev) => prev.filter((p) => p.userId !== leftUserId));
 
-      // Cleanup connection
+      // Cleanup
       setPeerConnections((prev) => {
         const newMap = new Map(prev);
         const pc = newMap.get(leftUserId);
@@ -464,14 +409,6 @@ const RoomPage = () => {
 
       try {
         await pc.setRemoteDescription(new RTCSessionDescription(offer));
-
-        // If we already have a local description, this might be a renegotiation
-        if (pc.localDescription && pc.localDescription.type === "offer") {
-          console.log(
-            `Already have local offer for ${from}, creating new answer`
-          );
-        }
-
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
 
@@ -490,10 +427,7 @@ const RoomPage = () => {
       const pc = peerConnections.get(from);
       if (pc) {
         try {
-          // Check if remote description is already set
-          if (!pc.remoteDescription || pc.remoteDescription.type !== "answer") {
-            await pc.setRemoteDescription(new RTCSessionDescription(answer));
-          }
+          await pc.setRemoteDescription(new RTCSessionDescription(answer));
         } catch (error) {
           console.error("Error handling answer:", error);
         }
@@ -535,7 +469,7 @@ const RoomPage = () => {
       }
     };
 
-    // Attach all handlers
+    // Attach event handlers
     socket.on("room-joined", handleRoomJoined);
     socket.on("user-joined", handleUserJoined);
     socket.on("user-left", handleUserLeft);
@@ -546,18 +480,10 @@ const RoomPage = () => {
     socket.on("screen-share-started", handleScreenShareStarted);
     socket.on("screen-share-stopped", handleScreenShareStopped);
 
-    // Show permission overlay
-    setTimeout(() => {
-      if (isMountedRef.current && !isJoiningMeeting) {
-        setShowPermissionOverlay(true);
-      }
-    }, 500);
-
     // Cleanup
     return () => {
       isMountedRef.current = false;
 
-      // Remove socket listeners
       if (socket) {
         socket.off("room-joined");
         socket.off("user-joined");
@@ -572,12 +498,12 @@ const RoomPage = () => {
         socket.emit("leave-room", { roomId, userId: userId.current });
       }
 
-      // Close peer connections
+      // Close connections
       peerConnections.forEach((pc) => {
         if (pc) pc.close();
       });
 
-      // Stop media tracks
+      // Stop media
       if (localStreamRef.current) {
         localStreamRef.current.getTracks().forEach((track) => track.stop());
       }
@@ -607,12 +533,6 @@ const RoomPage = () => {
         }
       });
 
-      socket.emit("toggle-video", {
-        roomId,
-        userId: userId.current,
-        enabled: newState,
-      });
-
       toast.success(newState ? "Video enabled" : "Video disabled");
     } else if (!hasCameraAccess) {
       toast.error("No camera available");
@@ -636,12 +556,6 @@ const RoomPage = () => {
         if (sender && audioTrack) {
           sender.replaceTrack(audioTrack);
         }
-      });
-
-      socket.emit("toggle-audio", {
-        roomId,
-        userId: userId.current,
-        enabled: newState,
       });
 
       toast.success(newState ? "Audio enabled" : "Audio muted");
@@ -685,7 +599,7 @@ const RoomPage = () => {
     }
   };
 
-  // Show permission overlay
+  // Show permission overlay immediately
   if (showPermissionOverlay && !isJoiningMeeting) {
     return (
       <div className="min-h-screen bg-gray-950 flex items-center justify-center p-4">
@@ -1095,7 +1009,7 @@ const RoomPage = () => {
     );
   }
 
-  // Initial loading state
+  // Initial loading state (only shown briefly)
   return (
     <div className="min-h-screen bg-gray-950 flex items-center justify-center p-4">
       <div className="text-center space-y-6 max-w-md">
@@ -1106,8 +1020,12 @@ const RoomPage = () => {
           </div>
         </div>
         <div className="space-y-3">
-          <h2 className="text-2xl font-bold text-white">Loading Meeting</h2>
-          <p className="text-gray-400">Preparing your video conference...</p>
+          <h2 className="text-2xl font-bold text-white">
+            Connecting to Meeting...
+          </h2>
+          <p className="text-gray-400">
+            Please wait while we connect you to the room.
+          </p>
         </div>
       </div>
     </div>
