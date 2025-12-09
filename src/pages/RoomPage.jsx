@@ -52,6 +52,7 @@ const RoomPage = () => {
   const [activeScreenShare, setActiveScreenShare] = useState(null);
   const [showPermissionOverlay, setShowPermissionOverlay] = useState(false);
   const [isJoiningMeeting, setIsJoiningMeeting] = useState(false);
+  const [roomReady, setRoomReady] = useState(false);
 
   // Store references
   const localStreamRef = useRef(null);
@@ -82,102 +83,84 @@ const RoomPage = () => {
     };
   }, []);
 
+  // WebRTC configuration
+  const configuration = {
+    iceServers: [
+      { urls: "stun:stun.l.google.com:19302" },
+      { urls: "stun:stun1.l.google.com:19302" },
+      { urls: "stun:stun2.l.google.com:19302" },
+    ],
+    iceCandidatePoolSize: 10,
+  };
+
   // Initialize media
-  const initializeMedia = useCallback(
-    async (skipPermission = false) => {
-      if (skipPermission) {
-        // Join without media
+  const initializeMedia = useCallback(async () => {
+    try {
+      setConnectionStatus("requesting-media");
+
+      const constraints = {
+        video: {
+          width: { ideal: 1280, min: 640 },
+          height: { ideal: 720, min: 480 },
+          frameRate: { ideal: 30 },
+          facingMode: "user",
+        },
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      };
+
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+
+      const videoTrack = stream.getVideoTracks()[0];
+      const audioTrack = stream.getAudioTracks()[0];
+
+      setHasCameraAccess(!!videoTrack);
+      setHasMicAccess(!!audioTrack);
+
+      if (videoTrack) videoTrack.enabled = isVideoEnabled;
+      if (audioTrack) audioTrack.enabled = isAudioEnabled;
+
+      setLocalStream(stream);
+      localStreamRef.current = stream;
+      setConnectionStatus("connected");
+
+      toast.success("Camera and microphone ready!");
+      return stream;
+    } catch (error) {
+      console.error("Media error:", error);
+
+      if (
+        error.name === "NotAllowedError" ||
+        error.name === "PermissionDeniedError"
+      ) {
+        // Continue without media
         setHasCameraAccess(false);
         setHasMicAccess(false);
         setConnectionStatus("connected");
-        setIsJoiningMeeting(true);
+        toast.info("Joining without camera/microphone");
+        return null;
+      } else {
+        toast.error("Failed to access media devices");
+        setConnectionStatus("error");
         return null;
       }
-
-      try {
-        setConnectionStatus("requesting-media");
-
-        const constraints = {
-          video: {
-            width: { ideal: 1280, min: 640 },
-            height: { ideal: 720, min: 480 },
-            frameRate: { ideal: 30 },
-            facingMode: "user",
-          },
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-          },
-        };
-
-        const stream = await navigator.mediaDevices.getUserMedia(constraints);
-
-        const videoTrack = stream.getVideoTracks()[0];
-        const audioTrack = stream.getAudioTracks()[0];
-
-        setHasCameraAccess(!!videoTrack);
-        setHasMicAccess(!!audioTrack);
-
-        if (videoTrack) videoTrack.enabled = isVideoEnabled;
-        if (audioTrack) audioTrack.enabled = isAudioEnabled;
-
-        setLocalStream(stream);
-        localStreamRef.current = stream;
-        setConnectionStatus("connected");
-        setIsJoiningMeeting(true);
-
-        toast.success("Camera and microphone ready!");
-        return stream;
-      } catch (error) {
-        console.error("Media error:", error);
-
-        if (
-          error.name === "NotAllowedError" ||
-          error.name === "PermissionDeniedError"
-        ) {
-          // Show permission overlay
-          setShowPermissionOverlay(true);
-          setConnectionStatus("permission-denied");
-          return null;
-        } else {
-          toast.error("Failed to access media devices");
-          setConnectionStatus("error");
-          return null;
-        }
-      }
-    },
-    [isVideoEnabled, isAudioEnabled]
-  );
-
-  // Handle permission decision
-  const handlePermissionDecision = async (allowCamera) => {
-    setShowPermissionOverlay(false);
-
-    if (allowCamera) {
-      await initializeMedia(false);
-    } else {
-      await initializeMedia(true);
-      toast.info("Joining meeting without camera/microphone");
     }
-  };
+  }, [isVideoEnabled, isAudioEnabled]);
 
   // Create peer connection
   const createPeerConnection = useCallback(
     (targetUserId) => {
       try {
+        // Close existing connection if any
         const existingPc = peerConnections.get(targetUserId);
         if (existingPc) {
           existingPc.close();
         }
 
-        const pc = new RTCPeerConnection({
-          iceServers: [
-            { urls: "stun:stun.l.google.com:19302" },
-            { urls: "stun:stun1.l.google.com:19302" },
-            { urls: "stun:stun2.l.google.com:19302" },
-          ],
-        });
+        const pc = new RTCPeerConnection(configuration);
 
         // Add local tracks if available
         if (localStreamRef.current) {
@@ -189,13 +172,14 @@ const RoomPage = () => {
             try {
               pc.addTrack(track, localStreamRef.current);
             } catch (err) {
-              console.warn(`Failed to add track:`, err);
+              console.warn(`Failed to add ${track.kind} track:`, err);
             }
           });
         }
 
         // Handle remote tracks
         pc.ontrack = (event) => {
+          console.log(`Received track from ${targetUserId}`, event.streams);
           if (event.streams && event.streams[0]) {
             setRemoteStreams((prev) => {
               const newMap = new Map(prev);
@@ -216,6 +200,29 @@ const RoomPage = () => {
           }
         };
 
+        // Connection state monitoring
+        pc.oniceconnectionstatechange = () => {
+          const state = pc.iceConnectionState;
+          console.log(`ICE state with ${targetUserId}:`, state);
+
+          if (state === "connected" || state === "completed") {
+            console.log(`✅ Connected to ${targetUserId}`);
+          } else if (state === "failed") {
+            console.log(
+              `❌ Connection failed with ${targetUserId}, restarting ICE...`
+            );
+            // Try to restart ICE
+            setTimeout(() => {
+              if (isMountedRef.current && peerConnections.has(targetUserId)) {
+                const newPc = createPeerConnection(targetUserId);
+                if (newPc) {
+                  sendOffer(newPc, targetUserId);
+                }
+              }
+            }, 1000);
+          }
+        };
+
         // Store connection
         setPeerConnections((prev) => {
           const newMap = new Map(prev);
@@ -229,7 +236,14 @@ const RoomPage = () => {
         return null;
       }
     },
-    [socket, peerConnections, isVideoEnabled, isAudioEnabled, isScreenSharing]
+    [
+      socket,
+      configuration,
+      isVideoEnabled,
+      isAudioEnabled,
+      isScreenSharing,
+      peerConnections,
+    ]
   );
 
   // Send offer to a participant
@@ -251,68 +265,7 @@ const RoomPage = () => {
     }
   };
 
-  // Handle screen sharing
-  const handleScreenShare = async () => {
-    try {
-      if (!isScreenSharing) {
-        const screenStream = await navigator.mediaDevices.getDisplayMedia({
-          video: true,
-          audio: false,
-        });
-
-        screenStreamRef.current = screenStream;
-        setIsScreenSharing(true);
-        setActiveScreenShare(userId.current);
-
-        const screenTrack = screenStream.getVideoTracks()[0];
-        peerConnections.forEach((pc) => {
-          const sender = pc.getSenders().find((s) => s.track?.kind === "video");
-          if (sender && screenTrack) {
-            sender.replaceTrack(screenTrack);
-          }
-        });
-
-        screenTrack.onended = () => {
-          handleScreenShare();
-        };
-
-        toast.success("Screen sharing started");
-        socket.emit("screen-share-started", { roomId, userId: userId.current });
-      } else {
-        if (screenStreamRef.current) {
-          screenStreamRef.current.getTracks().forEach((track) => track.stop());
-          screenStreamRef.current = null;
-        }
-
-        setIsScreenSharing(false);
-        setActiveScreenShare(null);
-
-        if (localStreamRef.current) {
-          const cameraTrack = localStreamRef.current.getVideoTracks()[0];
-          if (cameraTrack) {
-            peerConnections.forEach((pc) => {
-              const sender = pc
-                .getSenders()
-                .find((s) => s.track?.kind === "video");
-              if (sender && cameraTrack) {
-                sender.replaceTrack(cameraTrack);
-              }
-            });
-          }
-        }
-
-        toast.success("Screen sharing stopped");
-        socket.emit("screen-share-stopped", { roomId, userId: userId.current });
-      }
-    } catch (error) {
-      console.error("Screen share error:", error);
-      if (error.name !== "NotAllowedError") {
-        toast.error("Failed to share screen");
-      }
-    }
-  };
-
-  // Setup socket connection and room join
+  // Setup socket and room
   useEffect(() => {
     if (!socket || !isConnected) {
       console.log("Waiting for socket connection...");
@@ -335,24 +288,8 @@ const RoomPage = () => {
         existingParticipants.length
       );
       setParticipants(existingParticipants);
-
-      // Show permission overlay if not already joining
-      if (!isJoiningMeeting) {
-        setShowPermissionOverlay(true);
-      }
-
-      // Create connections with existing participants
-      existingParticipants.forEach((participant, index) => {
-        if (participant.userId !== userId.current) {
-          setTimeout(() => {
-            if (!isMountedRef.current) return;
-            const pc = createPeerConnection(participant.userId);
-            if (pc) {
-              sendOffer(pc, participant.userId);
-            }
-          }, index * 300);
-        }
-      });
+      setRoomReady(true);
+      setShowPermissionOverlay(true);
     };
 
     const handleUserJoined = (participant) => {
@@ -366,14 +303,16 @@ const RoomPage = () => {
         return [...prev, participant];
       });
 
-      // Create connection with new participant
-      setTimeout(() => {
-        if (!isMountedRef.current) return;
-        const pc = createPeerConnection(participant.userId);
-        if (pc) {
-          sendOffer(pc, participant.userId);
-        }
-      }, 300);
+      // If we're already in the meeting, create connection with new participant
+      if (isJoiningMeeting) {
+        setTimeout(() => {
+          if (!isMountedRef.current) return;
+          const pc = createPeerConnection(participant.userId);
+          if (pc) {
+            sendOffer(pc, participant.userId);
+          }
+        }, 500);
+      }
     };
 
     const handleUserLeft = ({ userId: leftUserId }) => {
@@ -451,25 +390,7 @@ const RoomPage = () => {
       }
     };
 
-    const handleScreenShareStarted = ({ userId: sharerId }) => {
-      setActiveScreenShare(sharerId);
-      if (sharerId !== userId.current) {
-        toast.info(
-          `${
-            participants.find((p) => p.userId === sharerId)?.userName ||
-            "Someone"
-          } started screen sharing`
-        );
-      }
-    };
-
-    const handleScreenShareStopped = ({ userId: sharerId }) => {
-      if (sharerId === activeScreenShare) {
-        setActiveScreenShare(null);
-      }
-    };
-
-    // Attach event handlers
+    // Attach all handlers
     socket.on("room-joined", handleRoomJoined);
     socket.on("user-joined", handleUserJoined);
     socket.on("user-left", handleUserLeft);
@@ -477,8 +398,6 @@ const RoomPage = () => {
     socket.on("answer", handleAnswer);
     socket.on("ice-candidate", handleIceCandidate);
     socket.on("new-message", handleNewMessage);
-    socket.on("screen-share-started", handleScreenShareStarted);
-    socket.on("screen-share-stopped", handleScreenShareStopped);
 
     // Cleanup
     return () => {
@@ -492,18 +411,14 @@ const RoomPage = () => {
         socket.off("answer");
         socket.off("ice-candidate");
         socket.off("new-message");
-        socket.off("screen-share-started");
-        socket.off("screen-share-stopped");
 
         socket.emit("leave-room", { roomId, userId: userId.current });
       }
 
-      // Close connections
       peerConnections.forEach((pc) => {
         if (pc) pc.close();
       });
 
-      // Stop media
       if (localStreamRef.current) {
         localStreamRef.current.getTracks().forEach((track) => track.stop());
       }
@@ -511,12 +426,40 @@ const RoomPage = () => {
         screenStreamRef.current.getTracks().forEach((track) => track.stop());
       }
     };
-  }, [socket, isConnected, roomId, userName, createPeerConnection]);
+  }, [socket, isConnected, roomId, userName]);
+
+  // Handle permission decision
+  const handlePermissionDecision = async (allowCamera) => {
+    setShowPermissionOverlay(false);
+
+    if (allowCamera) {
+      await initializeMedia();
+    } else {
+      setHasCameraAccess(false);
+      setHasMicAccess(false);
+      setConnectionStatus("connected");
+    }
+
+    setIsJoiningMeeting(true);
+
+    // Now create connections with existing participants
+    participants.forEach((participant, index) => {
+      if (participant.userId !== userId.current) {
+        setTimeout(() => {
+          if (!isMountedRef.current) return;
+          const pc = createPeerConnection(participant.userId);
+          if (pc) {
+            sendOffer(pc, participant.userId);
+          }
+        }, index * 500);
+      }
+    });
+  };
 
   // Control functions
   const toggleVideo = async () => {
     if (!localStreamRef.current) {
-      await initializeMedia(false);
+      await initializeMedia();
       return;
     }
 
@@ -541,7 +484,7 @@ const RoomPage = () => {
 
   const toggleAudio = async () => {
     if (!localStreamRef.current) {
-      await initializeMedia(false);
+      await initializeMedia();
       return;
     }
 
@@ -561,6 +504,64 @@ const RoomPage = () => {
       toast.success(newState ? "Audio enabled" : "Audio muted");
     } else if (!hasMicAccess) {
       toast.error("No microphone available");
+    }
+  };
+
+  const handleScreenShare = async () => {
+    try {
+      if (!isScreenSharing) {
+        const screenStream = await navigator.mediaDevices.getDisplayMedia({
+          video: true,
+          audio: false,
+        });
+
+        screenStreamRef.current = screenStream;
+        setIsScreenSharing(true);
+        setActiveScreenShare(userId.current);
+
+        const screenTrack = screenStream.getVideoTracks()[0];
+        peerConnections.forEach((pc) => {
+          const sender = pc.getSenders().find((s) => s.track?.kind === "video");
+          if (sender && screenTrack) {
+            sender.replaceTrack(screenTrack);
+          }
+        });
+
+        screenTrack.onended = () => {
+          handleScreenShare();
+        };
+
+        toast.success("Screen sharing started");
+      } else {
+        if (screenStreamRef.current) {
+          screenStreamRef.current.getTracks().forEach((track) => track.stop());
+          screenStreamRef.current = null;
+        }
+
+        setIsScreenSharing(false);
+        setActiveScreenShare(null);
+
+        if (localStreamRef.current) {
+          const cameraTrack = localStreamRef.current.getVideoTracks()[0];
+          if (cameraTrack) {
+            peerConnections.forEach((pc) => {
+              const sender = pc
+                .getSenders()
+                .find((s) => s.track?.kind === "video");
+              if (sender && cameraTrack) {
+                sender.replaceTrack(cameraTrack);
+              }
+            });
+          }
+        }
+
+        toast.success("Screen sharing stopped");
+      }
+    } catch (error) {
+      console.error("Screen share error:", error);
+      if (error.name !== "NotAllowedError") {
+        toast.error("Failed to share screen");
+      }
     }
   };
 
@@ -599,7 +600,7 @@ const RoomPage = () => {
     }
   };
 
-  // Show permission overlay immediately
+  // Show permission overlay when room is ready
   if (showPermissionOverlay && !isJoiningMeeting) {
     return (
       <div className="min-h-screen bg-gray-950 flex items-center justify-center p-4">
@@ -644,7 +645,7 @@ const RoomPage = () => {
               Room: <span className="font-mono text-primary-400">{roomId}</span>
             </p>
             <p className="text-xs text-gray-600 mt-2">
-              You can enable media later using the controls
+              Participants in room: {participants.length + 1}
             </p>
           </div>
         </div>
@@ -1009,27 +1010,35 @@ const RoomPage = () => {
     );
   }
 
-  // Initial loading state (only shown briefly)
-  return (
-    <div className="min-h-screen bg-gray-950 flex items-center justify-center p-4">
-      <div className="text-center space-y-6 max-w-md">
-        <div className="relative">
-          <div className="w-24 h-24 mx-auto border-4 border-primary-500/30 border-t-primary-500 rounded-full animate-spin"></div>
-          <div className="absolute inset-0 flex items-center justify-center">
-            <Video className="h-12 w-12 text-primary-500" />
+  // Initial loading state (shown while waiting for socket)
+  if (!roomReady) {
+    return (
+      <div className="min-h-screen bg-gray-950 flex items-center justify-center p-4">
+        <div className="text-center space-y-6 max-w-md">
+          <div className="relative">
+            <div className="w-24 h-24 mx-auto border-4 border-primary-500/30 border-t-primary-500 rounded-full animate-spin"></div>
+            <div className="absolute inset-0 flex items-center justify-center">
+              <Video className="h-12 w-12 text-primary-500" />
+            </div>
+          </div>
+          <div className="space-y-3">
+            <h2 className="text-2xl font-bold text-white">
+              Joining Meeting...
+            </h2>
+            <p className="text-gray-400">Connecting to room: {roomId}</p>
+            {!isConnected && (
+              <p className="text-yellow-400 text-sm">
+                Waiting for connection...
+              </p>
+            )}
           </div>
         </div>
-        <div className="space-y-3">
-          <h2 className="text-2xl font-bold text-white">
-            Connecting to Meeting...
-          </h2>
-          <p className="text-gray-400">
-            Please wait while we connect you to the room.
-          </p>
-        </div>
       </div>
-    </div>
-  );
+    );
+  }
+
+  // This shouldn't happen, but just in case
+  return null;
 };
 
 export default RoomPage;
