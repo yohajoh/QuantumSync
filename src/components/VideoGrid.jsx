@@ -113,6 +113,9 @@ const VideoGrid = ({
     })),
   ];
 
+  // Check if there's only one participant
+  const isSingleParticipant = allParticipants.length === 1;
+
   // Sort participants: screen sharers first, then video enabled, then others
   const sortedParticipants = [...allParticipants].sort((a, b) => {
     if (a.isScreenSharing && !b.isScreenSharing) return -1;
@@ -137,37 +140,41 @@ const VideoGrid = ({
       )}
 
       {/* Participant Count */}
-      <div className="mb-4 flex items-center justify-between">
-        <div className="flex items-center space-x-2">
-          <div className="flex items-center space-x-1 text-sm text-gray-400">
-            <User className="h-4 w-4" />
-            <span>{allParticipants.length} participants</span>
+      {!isSingleParticipant && (
+        <div className="mb-4 flex items-center justify-between">
+          <div className="flex items-center space-x-2">
+            <div className="flex items-center space-x-1 text-sm text-gray-400">
+              <User className="h-4 w-4" />
+              <span>{allParticipants.length} participants</span>
+            </div>
+            <div className="flex items-center space-x-1 text-sm text-gray-400">
+              <Video className="h-4 w-4" />
+              <span>
+                {allParticipants.filter((p) => p.videoEnabled).length} cameras
+              </span>
+            </div>
+            {activeScreenShare && (
+              <div className="flex items-center space-x-1 text-sm text-yellow-400">
+                <Share2 className="h-4 w-4" />
+                <span>Screen sharing active</span>
+              </div>
+            )}
           </div>
-          <div className="flex items-center space-x-1 text-sm text-gray-400">
-            <Video className="h-4 w-4" />
-            <span>
-              {allParticipants.filter((p) => p.videoEnabled).length} cameras
-            </span>
-          </div>
-          {activeScreenShare && (
-            <div className="flex items-center space-x-1 text-sm text-yellow-400">
-              <Share2 className="h-4 w-4" />
-              <span>Screen sharing active</span>
+
+          {allParticipants.length > 8 && !isMobile && (
+            <div className="text-sm text-gray-500">
+              Scroll to see more participants →
             </div>
           )}
         </div>
-
-        {allParticipants.length > 8 && !isMobile && (
-          <div className="text-sm text-gray-500">
-            Scroll to see more participants →
-          </div>
-        )}
-      </div>
+      )}
 
       {/* Video Grid Container */}
       <div
         className={`relative ${
-          isMobile
+          isSingleParticipant
+            ? "h-[calc(100vh-100px)]" // Full height for single participant
+            : isMobile
             ? "max-h-[70vh] overflow-y-auto"
             : "max-h-[70vh] overflow-hidden hover:overflow-y-auto"
         }`}
@@ -345,7 +352,7 @@ const VideoGrid = ({
       </div>
 
       {/* Scroll Indicator for mobile */}
-      {isMobile && allParticipants.length > 1 && (
+      {!isSingleParticipant && isMobile && allParticipants.length > 1 && (
         <div className="mt-2 text-center">
           <div className="inline-flex items-center space-x-1 text-xs text-gray-500">
             <span>↑↓</span>
