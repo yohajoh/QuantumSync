@@ -23,18 +23,15 @@ import {
   ArrowLeft,
 } from "lucide-react";
 import toast from "react-hot-toast";
-
 const RoomPage = () => {
   const { roomId } = useParams();
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const { socket, isConnected } = useSocket();
-
   const userName = searchParams.get("name") || "User";
   const userId = useRef(
     `user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
   );
-
   const [participants, setParticipants] = useState([]);
   const [localStream, setLocalStream] = useState(null);
   const [remoteStreams, setRemoteStreams] = useState(new Map());
@@ -54,7 +51,9 @@ const RoomPage = () => {
   const [showPermissionOverlay, setShowPermissionOverlay] = useState(false);
   const [isJoiningMeeting, setIsJoiningMeeting] = useState(false);
   const [roomReady, setRoomReady] = useState(false);
-
+  const [participantMediaStatus, setParticipantMediaStatus] = useState(
+    new Map()
+  );
   // Store references
   const localStreamRef = useRef(null);
   const screenStreamRef = useRef(null);
@@ -63,20 +62,16 @@ const RoomPage = () => {
   const remoteStreamsRef = useRef(new Map());
   const participantsRef = useRef([]);
   const dataChannelsRef = useRef(new Map());
-
   // Update refs when state changes
   useEffect(() => {
     peerConnectionsRef.current = peerConnections;
   }, [peerConnections]);
-
   useEffect(() => {
     remoteStreamsRef.current = remoteStreams;
   }, [remoteStreams]);
-
   useEffect(() => {
     participantsRef.current = participants;
   }, [participants]);
-
   // Check if mobile
   useEffect(() => {
     const checkMobile = () => {
@@ -84,23 +79,18 @@ const RoomPage = () => {
       setIsMobile(mobile);
       return mobile;
     };
-
     checkMobile();
     window.addEventListener("resize", checkMobile);
-
     const handleFullscreenChange = () => {
       setIsFullscreen(!!document.fullscreenElement);
     };
-
     document.addEventListener("fullscreenchange", handleFullscreenChange);
-
     return () => {
       isMountedRef.current = false;
       window.removeEventListener("resize", checkMobile);
       document.removeEventListener("fullscreenchange", handleFullscreenChange);
     };
   }, []);
-
   // WebRTC configuration
   const configuration = {
     iceServers: [
@@ -123,12 +113,10 @@ const RoomPage = () => {
     bundlePolicy: "max-bundle",
     rtcpMuxPolicy: "require",
   };
-
   // Initialize media
   const initializeMedia = useCallback(async () => {
     try {
       setConnectionStatus("requesting-media");
-
       const constraints = {
         video: {
           width: { ideal: 640, min: 320 },
@@ -142,27 +130,20 @@ const RoomPage = () => {
           autoGainControl: true,
         },
       };
-
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
-
       const videoTrack = stream.getVideoTracks()[0];
       const audioTrack = stream.getAudioTracks()[0];
-
       setHasCameraAccess(!!videoTrack);
       setHasMicAccess(!!audioTrack);
-
       if (videoTrack) videoTrack.enabled = isVideoEnabled;
       if (audioTrack) audioTrack.enabled = isAudioEnabled;
-
       setLocalStream(stream);
       localStreamRef.current = stream;
       setConnectionStatus("connected");
-
       toast.success("Camera and microphone ready!");
       return stream;
     } catch (error) {
       console.error("Media error:", error);
-
       if (
         error.name === "NotAllowedError" ||
         error.name === "PermissionDeniedError"
@@ -179,7 +160,6 @@ const RoomPage = () => {
       }
     }
   }, [isVideoEnabled, isAudioEnabled]);
-
   // Create peer connection with proper track handling
   const createPeerConnection = useCallback(
     (targetUserId, isInitiator = false) => {
@@ -190,16 +170,13 @@ const RoomPage = () => {
           existingPc.close();
           peerConnectionsRef.current.delete(targetUserId);
         }
-
         console.log(
           `Creating peer connection with ${targetUserId} (initiator: ${isInitiator})`
         );
         const pc = new RTCPeerConnection(configuration);
-
         // Store the connection immediately
         peerConnectionsRef.current.set(targetUserId, pc);
         setPeerConnections(new Map(peerConnectionsRef.current));
-
         // Create a data channel for metadata
         if (isInitiator) {
           try {
@@ -207,7 +184,6 @@ const RoomPage = () => {
               ordered: true,
             });
             dataChannelsRef.current.set(targetUserId, dataChannel);
-
             dataChannel.onopen = () => {
               console.log(`Data channel opened with ${targetUserId}`);
               // Send media status
@@ -224,40 +200,49 @@ const RoomPage = () => {
             console.warn("Failed to create data channel:", err);
           }
         }
-
         // Set up data channel for non-initiators
         pc.ondatachannel = (event) => {
           const dataChannel = event.channel;
           dataChannelsRef.current.set(targetUserId, dataChannel);
-
           dataChannel.onmessage = (event) => {
             try {
               const data = JSON.parse(event.data);
               console.log(`Received metadata from ${targetUserId}:`, data);
+              if (data.type === "media-status") {
+                setParticipantMediaStatus((prev) => {
+                  const newMap = new Map(prev);
+                  newMap.set(targetUserId, {
+                    videoEnabled: data.videoEnabled,
+                    audioEnabled: data.audioEnabled,
+                  });
+                  return newMap;
+                });
+              }
             } catch (err) {
               console.warn("Failed to parse metadata:", err);
             }
           };
-
           dataChannel.onopen = () => {
-            console.log(`Data channel received from ${targetUserId}`);
+            console.log(`Data channel opened with ${targetUserId}`);
+            dataChannel.send(
+              JSON.stringify({
+                type: "media-status",
+                videoEnabled: isVideoEnabled,
+                audioEnabled: isAudioEnabled,
+                userName: userName,
+              })
+            );
           };
         };
-
         // Add local tracks if available - CRITICAL: Add tracks BEFORE creating offer
         if (localStreamRef.current) {
           localStreamRef.current.getTracks().forEach((track) => {
-            if (track.kind === "video" && !isVideoEnabled && !isScreenSharing)
-              return;
-            if (track.kind === "audio" && !isAudioEnabled) return;
-
             try {
               // Check if track is already added
               const senders = pc.getSenders();
               const existingSender = senders.find(
                 (s) => s.track && s.track.kind === track.kind
               );
-
               if (existingSender) {
                 existingSender.replaceTrack(track);
               } else {
@@ -272,7 +257,6 @@ const RoomPage = () => {
             }
           });
         }
-
         // Handle remote tracks - THIS IS CRITICAL
         const remoteStream = new MediaStream();
         pc.ontrack = (event) => {
@@ -280,22 +264,18 @@ const RoomPage = () => {
             `Received ${event.track.kind} track from ${targetUserId}`,
             event
           );
-
           if (event.track) {
             // Add track to remote stream
             remoteStream.addTrack(event.track);
-
             // Update the remote streams map
             setRemoteStreams((prev) => {
               const newMap = new Map(prev);
               newMap.set(targetUserId, remoteStream);
               return newMap;
             });
-
             console.log(
               `Remote ${event.track.kind} track added for ${targetUserId}`
             );
-
             // Handle track ended
             event.track.onended = () => {
               console.log(`Track ended from ${targetUserId}`);
@@ -307,7 +287,6 @@ const RoomPage = () => {
             };
           }
         };
-
         // ICE candidate handling
         pc.onicecandidate = (event) => {
           if (event.candidate && socket?.connected) {
@@ -324,12 +303,10 @@ const RoomPage = () => {
             console.log(`All ICE candidates gathered for ${targetUserId}`);
           }
         };
-
         // ICE connection state
         pc.oniceconnectionstatechange = () => {
           const state = pc.iceConnectionState;
           console.log(`ICE state with ${targetUserId}:`, state);
-
           if (state === "connected" || state === "completed") {
             console.log(`✅ Connected to ${targetUserId}`);
             toast.success(
@@ -341,7 +318,6 @@ const RoomPage = () => {
           } else if (state === "failed" || state === "disconnected") {
             console.log(`❌ Connection ${state} with ${targetUserId}`);
             toast.error(`Connection ${state} with ${targetUserId}`);
-
             // Try to reconnect
             if (isMountedRef.current) {
               setTimeout(() => {
@@ -356,7 +332,6 @@ const RoomPage = () => {
             }
           }
         };
-
         // Signaling state
         pc.onsignalingstatechange = () => {
           console.log(
@@ -364,7 +339,6 @@ const RoomPage = () => {
             pc.signalingState
           );
         };
-
         // Connection state
         pc.onconnectionstatechange = () => {
           console.log(
@@ -372,7 +346,6 @@ const RoomPage = () => {
             pc.connectionState
           );
         };
-
         return pc;
       } catch (error) {
         console.error("Failed to create peer connection:", error);
@@ -389,17 +362,14 @@ const RoomPage = () => {
       userName,
     ]
   );
-
   // Send offer to a participant
   const sendOffer = async (pc, targetUserId) => {
     try {
       console.log(`Sending offer to ${targetUserId}`);
-
       // Ensure we have tracks before creating offer
       if (localStreamRef.current) {
         const videoTrack = localStreamRef.current.getVideoTracks()[0];
         const audioTrack = localStreamRef.current.getAudioTracks()[0];
-
         if (
           videoTrack &&
           !pc.getSenders().some((s) => s.track?.kind === "video")
@@ -413,43 +383,34 @@ const RoomPage = () => {
           pc.addTrack(audioTrack, localStreamRef.current);
         }
       }
-
       const offerOptions = {
         offerToReceiveAudio: true,
         offerToReceiveVideo: true,
       };
-
       console.log(`Creating offer for ${targetUserId}...`);
       const offer = await pc.createOffer(offerOptions);
       console.log(`Created offer for ${targetUserId}:`, offer.type);
-
       await pc.setLocalDescription(offer);
       console.log(`Set local description for ${targetUserId}`);
-
       socket.emit("offer", {
         offer: pc.localDescription,
         to: targetUserId,
         from: userId.current,
       });
-
       console.log(`Offer sent to ${targetUserId} via socket`);
     } catch (error) {
       console.error("Error sending offer:", error);
       toast.error(`Failed to send offer to ${targetUserId}`);
     }
   };
-
   // Handle new participant - create connection and send offer
   const handleNewParticipant = (participant) => {
     if (participant.userId === userId.current) return;
-
     console.log(
       `Setting up connection with new participant: ${participant.userName} (${participant.userId})`
     );
-
     // Create peer connection as initiator
     const pc = createPeerConnection(participant.userId, true);
-
     if (pc) {
       // Send offer after ensuring media is ready
       setTimeout(() => {
@@ -459,65 +420,52 @@ const RoomPage = () => {
       }, 1000);
     }
   };
-
   // Setup socket and room
   useEffect(() => {
     if (!socket || !isConnected) {
       console.log("Waiting for socket connection...");
       return;
     }
-
     console.log(`Joining room: ${roomId} as ${userName} (${userId.current})`);
     socket.emit("join-room", {
       roomId,
       userId: userId.current,
       userName,
     });
-
     // Setup socket event handlers
     const handleRoomJoined = ({ participants: existingParticipants }) => {
       if (!isMountedRef.current) return;
-
       console.log("Room joined, existing participants:", existingParticipants);
       setParticipants(existingParticipants);
       setRoomReady(true);
       setShowPermissionOverlay(true);
     };
-
     const handleUserJoined = (participant) => {
       if (!isMountedRef.current || participant.userId === userId.current)
         return;
-
       console.log(
         `New user joined: ${participant.userName} (${participant.userId})`
       );
-
       // Check if participant already exists
       setParticipants((prev) => {
         const exists = prev.some((p) => p.userId === participant.userId);
         if (exists) return prev;
-
         const newParticipants = [...prev, participant];
         participantsRef.current = newParticipants;
         return newParticipants;
       });
-
       // Handle new participant connection
       handleNewParticipant(participant);
     };
-
     const handleUserLeft = ({ userId: leftUserId }) => {
       if (!isMountedRef.current) return;
-
       console.log(`User left: ${leftUserId}`);
-
       // Remove from participants
       setParticipants((prev) => {
         const newParticipants = prev.filter((p) => p.userId !== leftUserId);
         participantsRef.current = newParticipants;
         return newParticipants;
       });
-
       // Cleanup peer connection
       const pc = peerConnectionsRef.current.get(leftUserId);
       if (pc) {
@@ -525,10 +473,8 @@ const RoomPage = () => {
         peerConnectionsRef.current.delete(leftUserId);
         setPeerConnections(new Map(peerConnectionsRef.current));
       }
-
       // Cleanup data channel
       dataChannelsRef.current.delete(leftUserId);
-
       // Cleanup remote stream
       setRemoteStreams((prev) => {
         const newMap = new Map(prev);
@@ -536,24 +482,19 @@ const RoomPage = () => {
         return newMap;
       });
     };
-
     const handleOffer = async ({ offer, from }) => {
       if (!isMountedRef.current || from === userId.current) return;
-
       console.log(`Received offer from ${from}`);
-
       let pc = peerConnectionsRef.current.get(from);
       if (!pc) {
         console.log(`Creating peer connection for offer from ${from}`);
         // Create peer connection as receiver
         pc = createPeerConnection(from, false);
       }
-
       try {
         console.log(`Setting remote description from ${from}...`);
         await pc.setRemoteDescription(new RTCSessionDescription(offer));
         console.log(`Remote description set from ${from}`);
-
         // Ensure we add our local tracks if we have media
         if (
           localStreamRef.current &&
@@ -567,31 +508,26 @@ const RoomPage = () => {
             }
           });
         }
-
         console.log(`Creating answer for ${from}...`);
         const answer = await pc.createAnswer({
           offerToReceiveAudio: true,
           offerToReceiveVideo: true,
         });
         console.log(`Answer created for ${from}:`, answer.type);
-
         await pc.setLocalDescription(answer);
         console.log(`Local description set for ${from}`);
-
         console.log(`Sending answer to ${from}...`);
         socket.emit("answer", {
           answer: pc.localDescription,
           to: from,
           from: userId.current,
         });
-
         console.log(`Answer sent to ${from}`);
       } catch (error) {
         console.error("Error handling offer:", error);
         toast.error(`Failed to handle offer from ${from}: ${error.message}`);
       }
     };
-
     const handleAnswer = async ({ answer, from }) => {
       console.log(`Received answer from ${from}`);
       const pc = peerConnectionsRef.current.get(from);
@@ -613,7 +549,6 @@ const RoomPage = () => {
         console.warn(`No peer connection found for ${from}`);
       }
     };
-
     const handleIceCandidate = async ({ candidate, from }) => {
       console.log(`Received ICE candidate from ${from}`);
       const pc = peerConnectionsRef.current.get(from);
@@ -629,18 +564,15 @@ const RoomPage = () => {
         console.warn(`No peer connection found for ICE candidate from ${from}`);
       }
     };
-
     const handleNewMessage = (message) => {
       if (isMountedRef.current) {
         setMessages((prev) => [...prev, message]);
       }
     };
-
     const handleRoomError = (error) => {
       console.error("Room error:", error);
       toast.error(error.message || "Room error occurred");
     };
-
     // Attach all handlers
     socket.on("room-joined", handleRoomJoined);
     socket.on("user-joined", handleUserJoined);
@@ -650,11 +582,9 @@ const RoomPage = () => {
     socket.on("ice-candidate", handleIceCandidate);
     socket.on("new-message", handleNewMessage);
     socket.on("room-error", handleRoomError);
-
     // Cleanup
     return () => {
       isMountedRef.current = false;
-
       if (socket) {
         socket.off("room-joined");
         socket.off("user-joined");
@@ -664,10 +594,8 @@ const RoomPage = () => {
         socket.off("ice-candidate");
         socket.off("new-message");
         socket.off("room-error");
-
         socket.emit("leave-room", { roomId, userId: userId.current });
       }
-
       // Close all peer connections
       peerConnectionsRef.current.forEach((pc, targetUserId) => {
         if (pc) {
@@ -677,7 +605,6 @@ const RoomPage = () => {
       });
       peerConnectionsRef.current.clear();
       dataChannelsRef.current.clear();
-
       // Stop all media tracks
       if (localStreamRef.current) {
         localStreamRef.current.getTracks().forEach((track) => {
@@ -693,11 +620,9 @@ const RoomPage = () => {
       }
     };
   }, [socket, isConnected, roomId, userName]);
-
   // Handle permission decision
   const handlePermissionDecision = async (allowCamera) => {
     setShowPermissionOverlay(false);
-
     if (allowCamera) {
       await initializeMedia();
     } else {
@@ -705,15 +630,12 @@ const RoomPage = () => {
       setHasMicAccess(false);
       setConnectionStatus("connected");
     }
-
     setIsJoiningMeeting(true);
-
     // Create connections with existing participants after media is ready
     const existingParticipants = participantsRef.current;
     console.log(
       `Creating connections with ${existingParticipants.length} existing participants`
     );
-
     existingParticipants.forEach((participant, index) => {
       if (participant.userId !== userId.current) {
         setTimeout(() => {
@@ -723,88 +645,126 @@ const RoomPage = () => {
       }
     });
   };
-
   // Control functions
   const toggleVideo = async () => {
-    if (!localStreamRef.current) {
-      await initializeMedia();
-      return;
-    }
-
-    const videoTrack = localStreamRef.current.getVideoTracks()[0];
-    if (videoTrack) {
-      const newState = !videoTrack.enabled;
-      videoTrack.enabled = newState;
-      setIsVideoEnabled(newState);
-
-      // Update all peer connections
+    let videoTrack = localStreamRef.current?.getVideoTracks()[0];
+    const currentState = !!videoTrack && isVideoEnabled;
+    const newState = !currentState;
+    if (newState) {
+      // Want to enable
+      if (!videoTrack) {
+        await initializeMedia();
+        videoTrack = localStreamRef.current?.getVideoTracks()[0];
+        if (!videoTrack) {
+          toast.error("No camera access");
+          return;
+        }
+      }
+      videoTrack.enabled = true;
+      setIsVideoEnabled(true);
+      let needRenegotiate = false;
       peerConnectionsRef.current.forEach((pc, targetUserId) => {
         const sender = pc.getSenders().find((s) => s.track?.kind === "video");
-        if (sender && videoTrack) {
+        if (sender) {
           sender.replaceTrack(videoTrack);
-          console.log(`Updated video track for ${targetUserId}`);
+        } else {
+          pc.addTrack(videoTrack, localStreamRef.current);
+          needRenegotiate = true;
         }
+        console.log(`Enabled video for ${targetUserId}`);
       });
-
-      // Send status update via data channels
-      dataChannelsRef.current.forEach((dc, targetUserId) => {
-        if (dc.readyState === "open") {
-          dc.send(
-            JSON.stringify({
-              type: "media-status",
-              videoEnabled: newState,
-              audioEnabled: isAudioEnabled,
-            })
-          );
-        }
-      });
-
-      toast.success(newState ? "Video enabled" : "Video disabled");
-    } else if (!hasCameraAccess) {
-      toast.error("No camera available");
+      if (needRenegotiate) {
+        peerConnectionsRef.current.forEach((pc, targetUserId) => {
+          sendOffer(pc, targetUserId);
+        });
+      }
+      toast.success("Video enabled");
+    } else {
+      // Want to disable
+      if (videoTrack) {
+        videoTrack.enabled = false;
+        setIsVideoEnabled(false);
+        peerConnectionsRef.current.forEach((pc, targetUserId) => {
+          const sender = pc.getSenders().find((s) => s.track?.kind === "video");
+          if (sender) {
+            sender.replaceTrack(videoTrack); // enabled=false
+          }
+        });
+      }
+      toast.success("Video disabled");
     }
+    // Send status
+    dataChannelsRef.current.forEach((dc, targetUserId) => {
+      if (dc.readyState === "open") {
+        dc.send(
+          JSON.stringify({
+            type: "media-status",
+            videoEnabled: newState,
+            audioEnabled: isAudioEnabled,
+          })
+        );
+      }
+    });
   };
-
   const toggleAudio = async () => {
-    if (!localStreamRef.current) {
-      await initializeMedia();
-      return;
-    }
-
-    const audioTrack = localStreamRef.current.getAudioTracks()[0];
-    if (audioTrack) {
-      const newState = !audioTrack.enabled;
-      audioTrack.enabled = newState;
-      setIsAudioEnabled(newState);
-
-      // Update all peer connections
+    let audioTrack = localStreamRef.current?.getAudioTracks()[0];
+    const currentState = !!audioTrack && isAudioEnabled;
+    const newState = !currentState;
+    if (newState) {
+      // enable
+      if (!audioTrack) {
+        await initializeMedia();
+        audioTrack = localStreamRef.current?.getAudioTracks()[0];
+        if (!audioTrack) {
+          toast.error("No microphone access");
+          return;
+        }
+      }
+      audioTrack.enabled = true;
+      setIsAudioEnabled(true);
+      let needRenegotiate = false;
       peerConnectionsRef.current.forEach((pc, targetUserId) => {
         const sender = pc.getSenders().find((s) => s.track?.kind === "audio");
-        if (sender && audioTrack) {
+        if (sender) {
           sender.replaceTrack(audioTrack);
-          console.log(`Updated audio track for ${targetUserId}`);
+        } else {
+          pc.addTrack(audioTrack, localStreamRef.current);
+          needRenegotiate = true;
         }
       });
-
-      // Send status update via data channels
-      dataChannelsRef.current.forEach((dc, targetUserId) => {
-        if (dc.readyState === "open") {
-          dc.send(
-            JSON.stringify({
-              type: "media-status",
-              videoEnabled: isVideoEnabled,
-              audioEnabled: newState,
-            })
-          );
-        }
-      });
-
-      toast.success(newState ? "Audio enabled" : "Audio muted");
-    } else if (!hasMicAccess) {
-      toast.error("No microphone available");
+      if (needRenegotiate) {
+        peerConnectionsRef.current.forEach((pc, targetUserId) => {
+          sendOffer(pc, targetUserId);
+        });
+      }
+      toast.success("Audio enabled");
+    } else {
+      // disable
+      if (audioTrack) {
+        audioTrack.enabled = false;
+        setIsAudioEnabled(false);
+        peerConnectionsRef.current.forEach((pc, targetUserId) => {
+          const sender = pc.getSenders().find((s) => s.track?.kind === "audio");
+          if (sender) {
+            sender.replaceTrack(audioTrack); // enabled=false
+          }
+        });
+      }
+      toast.success("Audio disabled");
     }
+    // Send status
+    dataChannelsRef.current.forEach((dc, targetUserId) => {
+      if (dc.readyState === "open") {
+        dc.send(
+          JSON.stringify({
+            type: "media-status",
+            videoEnabled: isVideoEnabled,
+            audioEnabled: newState,
+          })
+        );
+      }
+    });
   };
-
   const handleScreenShare = async () => {
     try {
       if (!isScreenSharing) {
@@ -816,13 +776,10 @@ const RoomPage = () => {
           },
           audio: false,
         });
-
         screenStreamRef.current = screenStream;
         setIsScreenSharing(true);
         setActiveScreenShare(userId.current);
-
         const screenTrack = screenStream.getVideoTracks()[0];
-
         // Replace video tracks in all peer connections
         peerConnectionsRef.current.forEach((pc, targetUserId) => {
           const sender = pc.getSenders().find((s) => s.track?.kind === "video");
@@ -831,25 +788,20 @@ const RoomPage = () => {
             console.log(`Started screen share for ${targetUserId}`);
           }
         });
-
         screenTrack.onended = () => {
           handleScreenShare();
         };
-
         toast.success("Screen sharing started");
       } else {
         if (screenStreamRef.current) {
           screenStreamRef.current.getTracks().forEach((track) => track.stop());
           screenStreamRef.current = null;
         }
-
         setIsScreenSharing(false);
         setActiveScreenShare(null);
-
         const replacementTrack = localStreamRef.current
           ? localStreamRef.current.getVideoTracks()[0]
           : null;
-
         // Restore original video tracks
         peerConnectionsRef.current.forEach((pc, targetUserId) => {
           const sender = pc.getSenders().find((s) => s.track?.kind === "video");
@@ -858,7 +810,6 @@ const RoomPage = () => {
             console.log(`Stopped screen share for ${targetUserId}`);
           }
         });
-
         toast.success("Screen sharing stopped");
       }
     } catch (error) {
@@ -868,7 +819,6 @@ const RoomPage = () => {
       }
     }
   };
-
   const toggleFullscreen = () => {
     const elem = document.documentElement;
     if (!isFullscreen) {
@@ -881,17 +831,14 @@ const RoomPage = () => {
       }
     }
   };
-
   const copyRoomId = () => {
     navigator.clipboard.writeText(roomId);
     toast.success("Room ID copied!");
   };
-
   const leaveRoom = () => {
     navigate("/");
     toast.success("Left the meeting");
   };
-
   const sendMessage = (message) => {
     if (socket?.connected) {
       socket.emit("send-message", {
@@ -903,7 +850,6 @@ const RoomPage = () => {
       });
     }
   };
-
   // Show permission overlay when room is ready
   if (showPermissionOverlay && !isJoiningMeeting) {
     return (
@@ -912,13 +858,11 @@ const RoomPage = () => {
           <div className="w-20 h-20 mx-auto mb-6 bg-primary-500/10 rounded-full flex items-center justify-center">
             <Video className="h-10 w-10 text-primary-400" />
           </div>
-
           <h1 className="text-2xl font-bold text-white mb-4">Join Meeting</h1>
           <p className="text-gray-400 mb-6">
             QuantumSync works best with camera and microphone access. Would you
             like to enable them for this meeting?
           </p>
-
           <div className="space-y-3">
             <button
               onClick={() => handlePermissionDecision(true)}
@@ -927,14 +871,12 @@ const RoomPage = () => {
               <Video className="h-5 w-5" />
               <span>Allow Camera & Microphone</span>
             </button>
-
             <button
               onClick={() => handlePermissionDecision(false)}
               className="w-full py-3 bg-gray-800 hover:bg-gray-700 rounded-lg font-medium transition"
             >
               Join Without Media
             </button>
-
             <button
               onClick={leaveRoom}
               className="w-full py-3 bg-gray-800/50 hover:bg-gray-800 rounded-lg font-medium transition flex items-center justify-center space-x-2"
@@ -943,7 +885,6 @@ const RoomPage = () => {
               <span>Back to Home</span>
             </button>
           </div>
-
           <div className="mt-6 pt-6 border-t border-gray-800">
             <p className="text-sm text-gray-500">
               Room: <span className="font-mono text-primary-400">{roomId}</span>
@@ -956,7 +897,6 @@ const RoomPage = () => {
       </div>
     );
   }
-
   // Show meeting room
   if (isJoiningMeeting) {
     // Mobile layout
@@ -993,7 +933,6 @@ const RoomPage = () => {
               </div>
             </div>
           </div>
-
           {/* Main Content */}
           <div className="pt-16 pb-24 px-2">
             <VideoGrid
@@ -1005,9 +944,9 @@ const RoomPage = () => {
               connectionStatus={connectionStatus}
               isMobile={true}
               activeScreenShare={activeScreenShare}
+              participantMediaStatus={participantMediaStatus}
             />
           </div>
-
           {/* Mobile Control Bar */}
           <div className="fixed bottom-0 left-0 right-0 bg-gray-900/95 backdrop-blur-lg border-t border-gray-800 p-3 z-40">
             <div className="flex items-center justify-around">
@@ -1037,7 +976,6 @@ const RoomPage = () => {
                     : "No Cam"}
                 </span>
               </button>
-
               <button
                 onClick={toggleAudio}
                 className={`flex flex-col items-center p-3 rounded-lg transition ${
@@ -1062,7 +1000,6 @@ const RoomPage = () => {
                     : "No Mic"}
                 </span>
               </button>
-
               <button
                 onClick={handleScreenShare}
                 className={`flex flex-col items-center p-3 rounded-lg transition ${
@@ -1078,7 +1015,6 @@ const RoomPage = () => {
                   {isScreenSharing ? "Stop" : "Share"}
                 </span>
               </button>
-
               <button
                 onClick={() => setShowChat(!showChat)}
                 className="flex flex-col items-center p-3 rounded-lg bg-gray-800 transition relative"
@@ -1091,7 +1027,6 @@ const RoomPage = () => {
                   </span>
                 )}
               </button>
-
               <button
                 onClick={leaveRoom}
                 className="flex flex-col items-center p-3 rounded-lg bg-red-600 transition"
@@ -1101,9 +1036,9 @@ const RoomPage = () => {
               </button>
             </div>
           </div>
-
           {/* Mobile Overlay Panels */}
-          {showChat && (
+          if (showChat){" "}
+          {
             <div className="fixed inset-0 bg-gray-950 z-50 pt-16">
               <div className="h-full flex flex-col">
                 <div className="flex items-center justify-between p-4 border-b border-gray-800">
@@ -1125,9 +1060,9 @@ const RoomPage = () => {
                 </div>
               </div>
             </div>
-          )}
-
-          {showParticipants && (
+          }
+          if (showParticipants){" "}
+          {
             <div className="fixed inset-0 bg-gray-950 z-50 pt-16">
               <div className="h-full flex flex-col">
                 <div className="flex items-center justify-between p-4 border-b border-gray-800">
@@ -1150,11 +1085,10 @@ const RoomPage = () => {
                 </div>
               </div>
             </div>
-          )}
+          }
         </div>
       );
     }
-
     // Desktop layout
     return (
       <div className="min-h-screen bg-gray-950 text-gray-100">
@@ -1186,7 +1120,6 @@ const RoomPage = () => {
                   </div>
                 </div>
               </div>
-
               <div className="flex items-center space-x-3">
                 <button
                   onClick={copyRoomId}
@@ -1196,7 +1129,6 @@ const RoomPage = () => {
                   <Copy className="h-4 w-4" />
                   <span>Copy ID</span>
                 </button>
-
                 <button
                   onClick={toggleFullscreen}
                   className="p-2 hover:bg-gray-800 rounded-lg transition"
@@ -1208,7 +1140,6 @@ const RoomPage = () => {
                     <Maximize2 className="h-5 w-5" />
                   )}
                 </button>
-
                 <button
                   onClick={() => setShowParticipants(!showParticipants)}
                   className={`p-2 rounded-lg transition ${
@@ -1218,7 +1149,6 @@ const RoomPage = () => {
                 >
                   <Users className="h-5 w-5" />
                 </button>
-
                 <button
                   onClick={() => setShowChat(!showChat)}
                   className={`p-2 rounded-lg transition relative ${
@@ -1237,7 +1167,6 @@ const RoomPage = () => {
             </div>
           </div>
         </header>
-
         <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
           <div className="flex space-x-6">
             {/* Main Video Area */}
@@ -1255,8 +1184,8 @@ const RoomPage = () => {
                 connectionStatus={connectionStatus}
                 isMobile={false}
                 activeScreenShare={activeScreenShare}
+                participantMediaStatus={participantMediaStatus}
               />
-
               <ControlBar
                 isVideoEnabled={isVideoEnabled && hasCameraAccess}
                 isAudioEnabled={isAudioEnabled && hasMicAccess}
@@ -1270,7 +1199,6 @@ const RoomPage = () => {
                 hasMicAccess={hasMicAccess}
               />
             </div>
-
             {/* Side Panels */}
             {(showChat || showParticipants) && (
               <div className="space-y-6 lg:w-1/4">
@@ -1289,7 +1217,6 @@ const RoomPage = () => {
                     />
                   </div>
                 )}
-
                 {showChat && (
                   <div className="relative">
                     <button
@@ -1313,7 +1240,6 @@ const RoomPage = () => {
       </div>
     );
   }
-
   // Initial loading state (shown while waiting for socket)
   if (!roomReady) {
     return (
@@ -1340,9 +1266,7 @@ const RoomPage = () => {
       </div>
     );
   }
-
   // This shouldn't happen, but just in case
   return null;
 };
-
 export default RoomPage;
