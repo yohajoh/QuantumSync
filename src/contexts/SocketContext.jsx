@@ -24,8 +24,7 @@ export const SocketProvider = ({ children }) => {
 
   useEffect(() => {
     // Initialize socket connection
-    const socketUrl =
-      process.env.REACT_APP_SOCKET_URL || "http://localhost:5000";
+    const socketUrl = import.meta.env.VITE_APP_URL || "http://localhost:5000";
 
     console.log("🔌 Connecting to socket server:", socketUrl);
 
