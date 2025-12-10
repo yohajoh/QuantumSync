@@ -131,7 +131,7 @@ const RoomPage = () => {
       setConnectionStatus("connected");
 
       // Add tracks to existing peer connections if any
-      peerConnections.forEach((pc) => {
+      peerConnections.forEach((pc, targetUserId) => {
         if (pc.connectionState !== "closed") {
           stream.getTracks().forEach((track) => {
             const sender = pc
@@ -145,6 +145,10 @@ const RoomPage = () => {
               }
             }
           });
+          // Trigger renegotiation if necessary
+          if (userId.current < targetUserId) {
+            sendOffer(pc, targetUserId);
+          }
         }
       });
 
@@ -184,9 +188,19 @@ const RoomPage = () => {
         const pc = new RTCPeerConnection(configuration);
 
         // Handle negotiation needed
-        pc.onnegotiationneeded = () => {
+        pc.onnegotiationneeded = async () => {
           console.log(`Negotiation needed with ${targetUserId}`);
-          sendOffer(pc, targetUserId);
+          try {
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            socket.emit("offer", {
+              offer: pc.localDescription,
+              to: targetUserId,
+              from: userId.current,
+            });
+          } catch (error) {
+            console.error("Error in onnegotiationneeded:", error);
+          }
         };
 
         // Add local tracks if available
@@ -228,25 +242,34 @@ const RoomPage = () => {
         };
 
         // Connection state monitoring
+        pc.onconnectionstatechange = () => {
+          console.log(
+            `Connection state with ${targetUserId}:`,
+            pc.connectionState
+          );
+        };
+
         pc.oniceconnectionstatechange = () => {
           const state = pc.iceConnectionState;
           console.log(`ICE state with ${targetUserId}:`, state);
 
           if (state === "connected" || state === "completed") {
             console.log(`✅ Connected to ${targetUserId}`);
-          } else if (state === "failed") {
+          } else if (state === "failed" || state === "disconnected") {
             console.log(
-              `❌ Connection failed with ${targetUserId}, restarting ICE...`
+              `❌ Connection ${state} with ${targetUserId}, restarting...`
             );
-            // Try to restart ICE
+            // Restart
             setTimeout(() => {
               if (isMountedRef.current && peerConnections.has(targetUserId)) {
                 const newPc = createPeerConnection(targetUserId);
-                if (newPc) {
-                  sendOffer(newPc, targetUserId);
-                }
+                setPeerConnections((prev) => {
+                  const newMap = new Map(prev);
+                  newMap.set(targetUserId, newPc);
+                  return newMap;
+                });
               }
-            }, 1000);
+            }, 2000);
           }
         };
 
@@ -263,43 +286,17 @@ const RoomPage = () => {
         return null;
       }
     },
-    [
-      socket,
-      configuration,
-      isVideoEnabled,
-      isAudioEnabled,
-      isScreenSharing,
-      peerConnections,
-    ]
+    [socket, isVideoEnabled, isAudioEnabled, isScreenSharing]
   );
-
-  // Send offer to a participant
-  const sendOffer = async (pc, targetUserId) => {
-    try {
-      const offer = await pc.createOffer({
-        offerToReceiveAudio: true,
-        offerToReceiveVideo: true,
-      });
-      await pc.setLocalDescription(offer);
-
-      socket.emit("offer", {
-        offer: pc.localDescription,
-        to: targetUserId,
-        from: userId.current,
-      });
-    } catch (error) {
-      console.error("Error sending offer:", error);
-    }
-  };
 
   // Connect to user with ID comparison
   const connectToUser = useCallback(
     (targetUserId) => {
       if (userId.current < targetUserId) {
-        const pc = createPeerConnection(targetUserId);
-        if (pc) {
-          // The onnegotiationneeded will trigger sendOffer
-        }
+        createPeerConnection(targetUserId);
+      } else {
+        // Create PC anyway to handle incoming offer
+        createPeerConnection(targetUserId);
       }
     },
     [createPeerConnection]
@@ -343,7 +340,9 @@ const RoomPage = () => {
         return [...prev, participant];
       });
 
-      connectToUser(participant.userId);
+      if (isReadyRef.current) {
+        connectToUser(participant.userId);
+      }
     };
 
     const handleUserLeft = ({ userId: leftUserId }) => {
@@ -530,10 +529,14 @@ const RoomPage = () => {
       videoTrack.enabled = newState;
       setIsVideoEnabled(newState);
 
-      peerConnections.forEach((pc) => {
+      peerConnections.forEach((pc, targetUserId) => {
         const sender = pc.getSenders().find((s) => s.track?.kind === "video");
         if (sender && videoTrack) {
-          sender.replaceTrack(videoTrack);
+          sender.replaceTrack(newState ? videoTrack : null);
+        }
+        // Renegotiate
+        if (userId.current < targetUserId) {
+          sendOffer(pc, targetUserId);
         }
       });
 
@@ -555,10 +558,14 @@ const RoomPage = () => {
       audioTrack.enabled = newState;
       setIsAudioEnabled(newState);
 
-      peerConnections.forEach((pc) => {
+      peerConnections.forEach((pc, targetUserId) => {
         const sender = pc.getSenders().find((s) => s.track?.kind === "audio");
         if (sender && audioTrack) {
-          sender.replaceTrack(audioTrack);
+          sender.replaceTrack(newState ? audioTrack : null);
+        }
+        // Renegotiate
+        if (userId.current < targetUserId) {
+          sendOffer(pc, targetUserId);
         }
       });
 
@@ -581,12 +588,16 @@ const RoomPage = () => {
         setActiveScreenShare(userId.current);
 
         const screenTrack = screenStream.getVideoTracks()[0];
-        peerConnections.forEach((pc) => {
+        peerConnections.forEach((pc, targetUserId) => {
           const sender = pc.getSenders().find((s) => s.track?.kind === "video");
           if (sender && screenTrack) {
             sender.replaceTrack(screenTrack);
           } else if (screenTrack) {
             pc.addTrack(screenTrack, screenStreamRef.current);
+          }
+          // Renegotiate
+          if (userId.current < targetUserId) {
+            sendOffer(pc, targetUserId);
           }
         });
 
@@ -608,10 +619,14 @@ const RoomPage = () => {
           ? localStreamRef.current.getVideoTracks()[0]
           : null;
 
-        peerConnections.forEach((pc) => {
+        peerConnections.forEach((pc, targetUserId) => {
           const sender = pc.getSenders().find((s) => s.track?.kind === "video");
           if (sender) {
             sender.replaceTrack(replacementTrack);
+          }
+          // Renegotiate
+          if (userId.current < targetUserId) {
+            sendOffer(pc, targetUserId);
           }
         });
 
