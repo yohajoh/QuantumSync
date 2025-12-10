@@ -54,7 +54,7 @@ const RoomPage = () => {
   const [isJoiningMeeting, setIsJoiningMeeting] = useState(false);
   const [roomReady, setRoomReady] = useState(false);
   const [debugInfo, setDebugInfo] = useState("");
-  const [joinError, setJoinError] = useState(false);
+  const [joinError, setJoinError] = useState(null);
 
   // Store references
   const localStreamRef = useRef(null);
@@ -365,9 +365,11 @@ const RoomPage = () => {
       // Set new timeout for join confirmation
       joinTimerRef.current = setTimeout(() => {
         addDebugLog("Timeout: No room-joined received");
-        setJoinError(true);
+        setJoinError(
+          "Timeout joining the room. Please check your connection or try again."
+        );
         toast.error("Timeout joining the room");
-      }, 15000); // 15 second timeout
+      }, 10000); // Reduced to 10 seconds for faster feedback
     }
   }, [socket, isConnected, roomId, userName, addDebugLog]);
 
@@ -390,6 +392,19 @@ const RoomPage = () => {
       setShowPermissionOverlay(true);
 
       // Clear join timeout on success
+      if (joinTimerRef.current) {
+        clearTimeout(joinTimerRef.current);
+        joinTimerRef.current = null;
+      }
+    };
+
+    const handleRoomError = ({ message }) => {
+      if (!isMountedRef.current) return;
+
+      addDebugLog(`Room error: ${message}`);
+      setJoinError(message || "Error joining the room");
+      toast.error(message || "Error joining the room");
+
       if (joinTimerRef.current) {
         clearTimeout(joinTimerRef.current);
         joinTimerRef.current = null;
@@ -492,6 +507,7 @@ const RoomPage = () => {
 
     // Attach handlers
     socket.on("room-joined", handleRoomJoined);
+    socket.on("room-error", handleRoomError);
     socket.on("user-joined", handleUserJoined);
     socket.on("user-left", handleUserLeft);
     socket.on("offer", handleOffer);
@@ -510,13 +526,14 @@ const RoomPage = () => {
       }
 
       if (socket) {
-        socket.off("room-joined");
-        socket.off("user-joined");
-        socket.off("user-left");
-        socket.off("offer");
-        socket.off("answer");
-        socket.off("ice-candidate");
-        socket.off("new-message");
+        socket.off("room-joined", handleRoomJoined);
+        socket.off("room-error", handleRoomError);
+        socket.off("user-joined", handleUserJoined);
+        socket.off("user-left", handleUserLeft);
+        socket.off("offer", handleOffer);
+        socket.off("answer", handleAnswer);
+        socket.off("ice-candidate", handleIceCandidate);
+        socket.off("new-message", handleNewMessage);
 
         socket.emit("leave-room", { roomId, userId: userId.current });
       }
@@ -1174,12 +1191,10 @@ const RoomPage = () => {
               <p className="text-gray-400">
                 Could not connect to room: {roomId}
               </p>
-              <p className="text-yellow-400 text-sm">
-                Check if the server is running or try again.
-              </p>
+              <p className="text-red-400 text-sm">{joinError}</p>
               <button
                 onClick={() => {
-                  setJoinError(false);
+                  setJoinError(null);
                   emitJoinRoom();
                 }}
                 className="py-3 px-6 bg-primary-600 hover:bg-primary-700 rounded-lg font-medium transition"
@@ -1215,6 +1230,24 @@ const RoomPage = () => {
                 Waiting for connection...
               </p>
             )}
+          </div>
+          {/* Add manual cancel/retry in loading */}
+          <div className="flex justify-center space-x-4 mt-4">
+            <button
+              onClick={() => {
+                if (joinTimerRef.current) clearTimeout(joinTimerRef.current);
+                setJoinError("Join cancelled");
+              }}
+              className="py-2 px-4 bg-gray-800 hover:bg-gray-700 rounded-lg font-medium transition"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={emitJoinRoom}
+              className="py-2 px-4 bg-primary-600 hover:bg-primary-700 rounded-lg font-medium transition"
+            >
+              Retry Now
+            </button>
           </div>
         </div>
       </div>
