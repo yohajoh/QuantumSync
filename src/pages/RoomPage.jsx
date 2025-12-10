@@ -54,6 +54,7 @@ const RoomPage = () => {
   const [isJoiningMeeting, setIsJoiningMeeting] = useState(false);
   const [roomReady, setRoomReady] = useState(false);
   const [debugInfo, setDebugInfo] = useState("");
+  const [joinError, setJoinError] = useState(false);
 
   // Store references
   const localStreamRef = useRef(null);
@@ -61,6 +62,7 @@ const RoomPage = () => {
   const isMountedRef = useRef(true);
   const pendingOffers = useRef(new Map());
   const videoElements = useRef(new Map());
+  const joinTimerRef = useRef(null);
 
   // Debug logging
   const addDebugLog = useCallback((message) => {
@@ -345,6 +347,30 @@ const RoomPage = () => {
     [createPeerConnection]
   );
 
+  // Function to emit join-room and start timeout
+  const emitJoinRoom = useCallback(() => {
+    if (socket && isConnected) {
+      addDebugLog(`Emitting join-room for ${roomId}`);
+      socket.emit("join-room", {
+        roomId,
+        userId: userId.current,
+        userName,
+      });
+
+      // Clear existing timer if any
+      if (joinTimerRef.current) {
+        clearTimeout(joinTimerRef.current);
+      }
+
+      // Set new timeout for join confirmation
+      joinTimerRef.current = setTimeout(() => {
+        addDebugLog("Timeout: No room-joined received");
+        setJoinError(true);
+        toast.error("Timeout joining the room");
+      }, 15000); // 15 second timeout
+    }
+  }, [socket, isConnected, roomId, userName, addDebugLog]);
+
   // Setup socket
   useEffect(() => {
     if (!socket || !isConnected) {
@@ -352,12 +378,7 @@ const RoomPage = () => {
       return;
     }
 
-    addDebugLog(`Joining room: ${roomId}`);
-    socket.emit("join-room", {
-      roomId,
-      userId: userId.current,
-      userName,
-    });
+    emitJoinRoom();
 
     // Event handlers
     const handleRoomJoined = ({ participants: existingParticipants }) => {
@@ -367,6 +388,12 @@ const RoomPage = () => {
       setParticipants(existingParticipants);
       setRoomReady(true);
       setShowPermissionOverlay(true);
+
+      // Clear join timeout on success
+      if (joinTimerRef.current) {
+        clearTimeout(joinTimerRef.current);
+        joinTimerRef.current = null;
+      }
     };
 
     const handleUserJoined = (participant) => {
@@ -477,6 +504,11 @@ const RoomPage = () => {
       isMountedRef.current = false;
       addDebugLog("Cleaning up...");
 
+      if (joinTimerRef.current) {
+        clearTimeout(joinTimerRef.current);
+        joinTimerRef.current = null;
+      }
+
       if (socket) {
         socket.off("room-joined");
         socket.off("user-joined");
@@ -508,6 +540,7 @@ const RoomPage = () => {
     isJoiningMeeting,
     connectToParticipant,
     addDebugLog,
+    emitJoinRoom,
   ]);
 
   // Handle permission decision
@@ -1125,8 +1158,46 @@ const RoomPage = () => {
     );
   }
 
-  // Loading state
+  // Loading or error state
   if (!roomReady) {
+    if (joinError) {
+      return (
+        <div className="min-h-screen bg-gray-950 flex items-center justify-center p-4">
+          <div className="text-center space-y-6 max-w-md">
+            <div className="w-20 h-20 mx-auto bg-red-500/10 rounded-full flex items-center justify-center">
+              <X className="h-10 w-10 text-red-400" />
+            </div>
+            <div className="space-y-3">
+              <h2 className="text-xl font-bold text-white">
+                Error Joining Meeting
+              </h2>
+              <p className="text-gray-400">
+                Could not connect to room: {roomId}
+              </p>
+              <p className="text-yellow-400 text-sm">
+                Check if the server is running or try again.
+              </p>
+              <button
+                onClick={() => {
+                  setJoinError(false);
+                  emitJoinRoom();
+                }}
+                className="py-3 px-6 bg-primary-600 hover:bg-primary-700 rounded-lg font-medium transition"
+              >
+                Retry
+              </button>
+              <button
+                onClick={leaveRoom}
+                className="py-3 px-6 bg-gray-800 hover:bg-gray-700 rounded-lg font-medium transition ml-4"
+              >
+                Back to Home
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
     return (
       <div className="min-h-screen bg-gray-950 flex items-center justify-center p-4">
         <div className="text-center space-y-6 max-w-md">
