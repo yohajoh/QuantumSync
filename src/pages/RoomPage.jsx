@@ -21,6 +21,7 @@ import {
   MicOff,
   Share2,
   ArrowLeft,
+  RefreshCw,
 } from "lucide-react";
 import toast from "react-hot-toast";
 
@@ -54,13 +55,19 @@ const RoomPage = () => {
   const [showPermissionOverlay, setShowPermissionOverlay] = useState(false);
   const [isJoiningMeeting, setIsJoiningMeeting] = useState(false);
   const [roomReady, setRoomReady] = useState(false);
+  const [debugInfo, setDebugInfo] = useState("");
 
   // Store references
   const localStreamRef = useRef(null);
   const screenStreamRef = useRef(null);
   const isMountedRef = useRef(true);
-  const isReadyRef = useRef(false);
-  const pendingSignaling = useRef(new Map());
+  const pendingIceCandidates = useRef(new Map());
+
+  // Debug logging
+  const addDebugLog = (message) => {
+    console.log(`[${new Date().toLocaleTimeString()}] ${message}`);
+    setDebugInfo(message);
+  };
 
   // Check if mobile
   useEffect(() => {
@@ -100,6 +107,7 @@ const RoomPage = () => {
   const initializeMedia = useCallback(async () => {
     try {
       setConnectionStatus("requesting-media");
+      addDebugLog("Requesting camera and microphone...");
 
       const constraints = {
         video: {
@@ -116,6 +124,7 @@ const RoomPage = () => {
       };
 
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      addDebugLog("Media stream obtained successfully");
 
       const videoTrack = stream.getVideoTracks()[0];
       const audioTrack = stream.getAudioTracks()[0];
@@ -130,38 +139,16 @@ const RoomPage = () => {
       localStreamRef.current = stream;
       setConnectionStatus("connected");
 
-      // Add tracks to existing peer connections if any
-      peerConnections.forEach((pc, targetUserId) => {
-        if (pc.connectionState !== "closed") {
-          stream.getTracks().forEach((track) => {
-            const sender = pc
-              .getSenders()
-              .find((s) => s.track?.kind === track.kind);
-            if (!sender) {
-              try {
-                pc.addTrack(track, stream);
-              } catch (err) {
-                console.warn("Failed to add track:", err);
-              }
-            }
-          });
-          // Trigger renegotiation if necessary
-          if (userId.current < targetUserId) {
-            sendOffer(pc, targetUserId);
-          }
-        }
-      });
-
       toast.success("Camera and microphone ready!");
       return stream;
     } catch (error) {
       console.error("Media error:", error);
+      addDebugLog(`Media error: ${error.message}`);
 
       if (
         error.name === "NotAllowedError" ||
         error.name === "PermissionDeniedError"
       ) {
-        // Continue without media
         setHasCameraAccess(false);
         setHasMicAccess(false);
         setConnectionStatus("connected");
@@ -173,44 +160,35 @@ const RoomPage = () => {
         return null;
       }
     }
-  }, [isVideoEnabled, isAudioEnabled, peerConnections]);
+  }, [isVideoEnabled, isAudioEnabled]);
 
   // Create peer connection
   const createPeerConnection = useCallback(
     (targetUserId) => {
       try {
+        addDebugLog(`Creating peer connection with ${targetUserId}`);
+
         // Close existing connection if any
         const existingPc = peerConnections.get(targetUserId);
         if (existingPc) {
+          addDebugLog(`Closing existing connection with ${targetUserId}`);
           existingPc.close();
         }
 
         const pc = new RTCPeerConnection(configuration);
 
-        // Handle negotiation needed
-        pc.onnegotiationneeded = async () => {
-          console.log(`Negotiation needed with ${targetUserId}`);
-          try {
-            const offer = await pc.createOffer();
-            await pc.setLocalDescription(offer);
-            socket.emit("offer", {
-              offer: pc.localDescription,
-              to: targetUserId,
-              from: userId.current,
-            });
-          } catch (error) {
-            console.error("Error in onnegotiationneeded:", error);
-          }
+        // Track stats
+        const stats = {
+          iceState: "new",
+          connectionState: "new",
+          tracksReceived: 0,
         };
 
         // Add local tracks if available
         if (localStreamRef.current) {
           localStreamRef.current.getTracks().forEach((track) => {
-            if (track.kind === "video" && !isVideoEnabled && !isScreenSharing)
-              return;
-            if (track.kind === "audio" && !isAudioEnabled) return;
-
             try {
+              addDebugLog(`Adding ${track.kind} track to ${targetUserId}`);
               pc.addTrack(track, localStreamRef.current);
             } catch (err) {
               console.warn(`Failed to add ${track.kind} track:`, err);
@@ -218,15 +196,40 @@ const RoomPage = () => {
           });
         }
 
-        // Handle remote tracks
+        // Handle remote tracks - FIXED THIS PART
         pc.ontrack = (event) => {
-          console.log(`Received track from ${targetUserId}`, event.streams);
-          if (event.streams && event.streams[0]) {
+          addDebugLog(
+            `Received ${event.track.kind} track from ${targetUserId}`
+          );
+          stats.tracksReceived++;
+
+          if (event.streams && event.streams.length > 0) {
+            const stream = event.streams[0];
+
+            // Check if stream has video tracks
+            const videoTracks = stream.getVideoTracks();
+            const audioTracks = stream.getAudioTracks();
+
+            addDebugLog(
+              `Stream from ${targetUserId}: ${videoTracks.length} video, ${audioTracks.length} audio tracks`
+            );
+
             setRemoteStreams((prev) => {
               const newMap = new Map(prev);
-              newMap.set(targetUserId, event.streams[0]);
+              newMap.set(targetUserId, stream);
               return newMap;
             });
+
+            // Force re-render by updating state
+            setTimeout(() => {
+              if (isMountedRef.current) {
+                setRemoteStreams((newMap) => {
+                  const updatedMap = new Map(newMap);
+                  updatedMap.set(targetUserId, stream);
+                  return updatedMap;
+                });
+              }
+            }, 100);
           }
         };
 
@@ -242,35 +245,40 @@ const RoomPage = () => {
         };
 
         // Connection state monitoring
-        pc.onconnectionstatechange = () => {
-          console.log(
-            `Connection state with ${targetUserId}:`,
-            pc.connectionState
-          );
-        };
-
         pc.oniceconnectionstatechange = () => {
           const state = pc.iceConnectionState;
-          console.log(`ICE state with ${targetUserId}:`, state);
+          stats.iceState = state;
+          addDebugLog(`ICE state with ${targetUserId}: ${state}`);
 
           if (state === "connected" || state === "completed") {
-            console.log(`✅ Connected to ${targetUserId}`);
-          } else if (state === "failed" || state === "disconnected") {
-            console.log(
-              `❌ Connection ${state} with ${targetUserId}, restarting...`
-            );
-            // Restart
+            addDebugLog(`✅ Connected to ${targetUserId}`);
+            toast.success(`Connected to ${targetUserId}`);
+
+            // Process pending ICE candidates
+            const pending = pendingIceCandidates.current.get(targetUserId);
+            if (pending) {
+              pending.forEach((candidate) => {
+                pc.addIceCandidate(candidate);
+              });
+              pendingIceCandidates.current.delete(targetUserId);
+            }
+          } else if (state === "failed") {
+            addDebugLog(`❌ Connection failed with ${targetUserId}`);
+            // Try to restart ICE
             setTimeout(() => {
               if (isMountedRef.current && peerConnections.has(targetUserId)) {
-                const newPc = createPeerConnection(targetUserId);
-                setPeerConnections((prev) => {
-                  const newMap = new Map(prev);
-                  newMap.set(targetUserId, newPc);
-                  return newMap;
-                });
+                addDebugLog(`🔄 Restarting ICE with ${targetUserId}`);
+                pc.restartIce();
               }
             }, 2000);
           }
+        };
+
+        pc.onconnectionstatechange = () => {
+          stats.connectionState = pc.connectionState;
+          addDebugLog(
+            `Connection state with ${targetUserId}: ${pc.connectionState}`
+          );
         };
 
         // Store connection
@@ -283,33 +291,46 @@ const RoomPage = () => {
         return pc;
       } catch (error) {
         console.error("Failed to create peer connection:", error);
+        addDebugLog(
+          `Failed to create PC with ${targetUserId}: ${error.message}`
+        );
         return null;
       }
     },
-    [socket, isVideoEnabled, isAudioEnabled, isScreenSharing]
+    [socket, configuration, peerConnections]
   );
 
-  // Connect to user with ID comparison
-  const connectToUser = useCallback(
-    (targetUserId) => {
-      if (userId.current < targetUserId) {
-        createPeerConnection(targetUserId);
-      } else {
-        // Create PC anyway to handle incoming offer
-        createPeerConnection(targetUserId);
+  // Create and send offer
+  const createOffer = async (pc, targetUserId) => {
+    try {
+      addDebugLog(`Creating offer for ${targetUserId}`);
+      const offer = await pc.createOffer({
+        offerToReceiveAudio: true,
+        offerToReceiveVideo: true,
+      });
+      await pc.setLocalDescription(offer);
+
+      if (socket?.connected) {
+        socket.emit("offer", {
+          offer: pc.localDescription,
+          to: targetUserId,
+          from: userId.current,
+        });
       }
-    },
-    [createPeerConnection]
-  );
+    } catch (error) {
+      console.error("Error creating offer:", error);
+      addDebugLog(`Offer error: ${error.message}`);
+    }
+  };
 
   // Setup socket and room
   useEffect(() => {
     if (!socket || !isConnected) {
-      console.log("Waiting for socket connection...");
+      addDebugLog("Waiting for socket connection...");
       return;
     }
 
-    console.log(`Joining room: ${roomId}`);
+    addDebugLog(`Joining room: ${roomId}`);
     socket.emit("join-room", {
       roomId,
       userId: userId.current,
@@ -320,10 +341,7 @@ const RoomPage = () => {
     const handleRoomJoined = ({ participants: existingParticipants }) => {
       if (!isMountedRef.current) return;
 
-      console.log(
-        "Room joined, existing participants:",
-        existingParticipants.length
-      );
+      addDebugLog(`Room joined. Participants: ${existingParticipants.length}`);
       setParticipants(existingParticipants);
       setRoomReady(true);
       setShowPermissionOverlay(true);
@@ -333,29 +351,38 @@ const RoomPage = () => {
       if (!isMountedRef.current || participant.userId === userId.current)
         return;
 
-      console.log(`New user joined: ${participant.userName}`);
+      addDebugLog(`New user joined: ${participant.userName}`);
       setParticipants((prev) => {
         const exists = prev.some((p) => p.userId === participant.userId);
         if (exists) return prev;
         return [...prev, participant];
       });
 
-      if (isReadyRef.current) {
-        connectToUser(participant.userId);
+      // Connect to new user if we're already in the meeting
+      if (isJoiningMeeting) {
+        setTimeout(() => {
+          const pc = createPeerConnection(participant.userId);
+          if (pc) {
+            createOffer(pc, participant.userId);
+          }
+        }, 1000);
       }
     };
 
     const handleUserLeft = ({ userId: leftUserId }) => {
       if (!isMountedRef.current) return;
 
-      console.log(`User left: ${leftUserId}`);
+      addDebugLog(`User left: ${leftUserId}`);
       setParticipants((prev) => prev.filter((p) => p.userId !== leftUserId));
 
       // Cleanup
       setPeerConnections((prev) => {
         const newMap = new Map(prev);
         const pc = newMap.get(leftUserId);
-        if (pc) pc.close();
+        if (pc) {
+          addDebugLog(`Closing PC for ${leftUserId}`);
+          pc.close();
+        }
         newMap.delete(leftUserId);
         return newMap;
       });
@@ -365,19 +392,14 @@ const RoomPage = () => {
         newMap.delete(leftUserId);
         return newMap;
       });
+
+      pendingIceCandidates.current.delete(leftUserId);
     };
 
     const handleOffer = async ({ offer, from }) => {
-      if (!isMountedRef.current) return;
+      if (!isMountedRef.current || from === userId.current) return;
 
-      if (!isReadyRef.current) {
-        const queue = pendingSignaling.current.get(from) || [];
-        queue.push({ type: "offer", data: { offer, from } });
-        pendingSignaling.current.set(from, queue);
-        return;
-      }
-
-      console.log(`Received offer from ${from}`);
+      addDebugLog(`Received offer from ${from}`);
       let pc = peerConnections.get(from);
       if (!pc) {
         pc = createPeerConnection(from);
@@ -393,42 +415,40 @@ const RoomPage = () => {
           to: from,
           from: userId.current,
         });
+        addDebugLog(`Sent answer to ${from}`);
       } catch (error) {
         console.error("Error handling offer:", error);
+        addDebugLog(`Offer handling error: ${error.message}`);
       }
     };
 
     const handleAnswer = async ({ answer, from }) => {
-      if (!isReadyRef.current) {
-        const queue = pendingSignaling.current.get(from) || [];
-        queue.push({ type: "answer", data: { answer, from } });
-        pendingSignaling.current.set(from, queue);
-        return;
-      }
-
-      console.log(`Received answer from ${from}`);
+      addDebugLog(`Received answer from ${from}`);
       const pc = peerConnections.get(from);
       if (pc) {
         try {
           await pc.setRemoteDescription(new RTCSessionDescription(answer));
+          addDebugLog(`Answer accepted from ${from}`);
         } catch (error) {
           console.error("Error handling answer:", error);
+          addDebugLog(`Answer error: ${error.message}`);
         }
       }
     };
 
     const handleIceCandidate = async ({ candidate, from }) => {
-      if (!isReadyRef.current) {
-        const queue = pendingSignaling.current.get(from) || [];
-        queue.push({ type: "candidate", data: { candidate, from } });
-        pendingSignaling.current.set(from, queue);
-        return;
-      }
-
       const pc = peerConnections.get(from);
-      if (pc && candidate) {
+      if (pc) {
         try {
-          await pc.addIceCandidate(new RTCIceCandidate(candidate));
+          if (pc.remoteDescription) {
+            await pc.addIceCandidate(new RTCIceCandidate(candidate));
+          } else {
+            // Store candidate until remote description is set
+            const pending = pendingIceCandidates.current.get(from) || [];
+            pending.push(new RTCIceCandidate(candidate));
+            pendingIceCandidates.current.set(from, pending);
+            addDebugLog(`Queued ICE candidate from ${from}`);
+          }
         } catch (error) {
           console.error("Error adding ICE candidate:", error);
         }
@@ -453,6 +473,7 @@ const RoomPage = () => {
     // Cleanup
     return () => {
       isMountedRef.current = false;
+      addDebugLog("Cleaning up...");
 
       if (socket) {
         socket.off("room-joined");
@@ -466,8 +487,11 @@ const RoomPage = () => {
         socket.emit("leave-room", { roomId, userId: userId.current });
       }
 
-      peerConnections.forEach((pc) => {
-        if (pc) pc.close();
+      peerConnections.forEach((pc, id) => {
+        if (pc) {
+          addDebugLog(`Closing PC for ${id}`);
+          pc.close();
+        }
       });
 
       if (localStreamRef.current) {
@@ -477,41 +501,40 @@ const RoomPage = () => {
         screenStreamRef.current.getTracks().forEach((track) => track.stop());
       }
     };
-  }, [socket, isConnected, roomId, userName, connectToUser]);
+  }, [
+    socket,
+    isConnected,
+    roomId,
+    userName,
+    isJoiningMeeting,
+    createPeerConnection,
+  ]);
 
   // Handle permission decision
   const handlePermissionDecision = async (allowCamera) => {
     setShowPermissionOverlay(false);
+    setIsJoiningMeeting(true);
 
+    let stream = null;
     if (allowCamera) {
-      await initializeMedia();
+      stream = await initializeMedia();
     } else {
       setHasCameraAccess(false);
       setHasMicAccess(false);
       setConnectionStatus("connected");
     }
 
-    isReadyRef.current = true;
-    setIsJoiningMeeting(true);
-
-    // Process pending signaling
-    pendingSignaling.current.forEach((queue, fromId) => {
-      queue.forEach((item) => {
-        if (item.type === "offer") {
-          handleOffer(item.data);
-        } else if (item.type === "answer") {
-          handleAnswer(item.data);
-        } else if (item.type === "candidate") {
-          handleIceCandidate(item.data);
-        }
-      });
-    });
-    pendingSignaling.current.clear();
-
     // Connect to existing participants
-    participants.forEach((participant) => {
+    addDebugLog(`Connecting to ${participants.length} participants...`);
+
+    participants.forEach((participant, index) => {
       if (participant.userId !== userId.current) {
-        connectToUser(participant.userId);
+        setTimeout(() => {
+          const pc = createPeerConnection(participant.userId);
+          if (pc) {
+            createOffer(pc, participant.userId);
+          }
+        }, index * 1000); // Stagger connections
       }
     });
   };
@@ -529,14 +552,11 @@ const RoomPage = () => {
       videoTrack.enabled = newState;
       setIsVideoEnabled(newState);
 
+      // Update all peer connections
       peerConnections.forEach((pc, targetUserId) => {
         const sender = pc.getSenders().find((s) => s.track?.kind === "video");
         if (sender && videoTrack) {
-          sender.replaceTrack(newState ? videoTrack : null);
-        }
-        // Renegotiate
-        if (userId.current < targetUserId) {
-          sendOffer(pc, targetUserId);
+          sender.replaceTrack(videoTrack);
         }
       });
 
@@ -558,14 +578,11 @@ const RoomPage = () => {
       audioTrack.enabled = newState;
       setIsAudioEnabled(newState);
 
+      // Update all peer connections
       peerConnections.forEach((pc, targetUserId) => {
         const sender = pc.getSenders().find((s) => s.track?.kind === "audio");
         if (sender && audioTrack) {
-          sender.replaceTrack(newState ? audioTrack : null);
-        }
-        // Renegotiate
-        if (userId.current < targetUserId) {
-          sendOffer(pc, targetUserId);
+          sender.replaceTrack(audioTrack);
         }
       });
 
@@ -592,12 +609,6 @@ const RoomPage = () => {
           const sender = pc.getSenders().find((s) => s.track?.kind === "video");
           if (sender && screenTrack) {
             sender.replaceTrack(screenTrack);
-          } else if (screenTrack) {
-            pc.addTrack(screenTrack, screenStreamRef.current);
-          }
-          // Renegotiate
-          if (userId.current < targetUserId) {
-            sendOffer(pc, targetUserId);
           }
         });
 
@@ -621,12 +632,8 @@ const RoomPage = () => {
 
         peerConnections.forEach((pc, targetUserId) => {
           const sender = pc.getSenders().find((s) => s.track?.kind === "video");
-          if (sender) {
+          if (sender && replacementTrack) {
             sender.replaceTrack(replacementTrack);
-          }
-          // Renegotiate
-          if (userId.current < targetUserId) {
-            sendOffer(pc, targetUserId);
           }
         });
 
@@ -674,6 +681,57 @@ const RoomPage = () => {
       });
     }
   };
+
+  // Refresh connections
+  const refreshConnections = () => {
+    addDebugLog("Refreshing all connections...");
+
+    // Close all existing connections
+    peerConnections.forEach((pc, id) => {
+      if (pc) pc.close();
+    });
+
+    setPeerConnections(new Map());
+    setRemoteStreams(new Map());
+
+    // Reconnect to all participants
+    setTimeout(() => {
+      participants.forEach((participant, index) => {
+        if (participant.userId !== userId.current) {
+          setTimeout(() => {
+            const pc = createPeerConnection(participant.userId);
+            if (pc) {
+              createOffer(pc, participant.userId);
+            }
+          }, index * 1000);
+        }
+      });
+    }, 500);
+  };
+
+  // Debug panel
+  const renderDebugPanel = () => (
+    <div className="fixed bottom-4 right-4 z-50">
+      <div className="bg-black/80 text-white text-xs p-3 rounded-lg max-w-xs">
+        <div className="flex justify-between items-center mb-2">
+          <span className="font-bold">Debug Info</span>
+          <button
+            onClick={refreshConnections}
+            className="p-1 bg-blue-600 rounded text-xs"
+          >
+            <RefreshCw className="h-3 w-3" />
+          </button>
+        </div>
+        <div className="space-y-1">
+          <div>User ID: {userId.current}</div>
+          <div>Participants: {participants.length}</div>
+          <div>Peer Connections: {peerConnections.size}</div>
+          <div>Remote Streams: {remoteStreams.size}</div>
+          <div className="text-yellow-300">{debugInfo}</div>
+        </div>
+      </div>
+    </div>
+  );
 
   // Show permission overlay when room is ready
   if (showPermissionOverlay && !isJoiningMeeting) {
@@ -730,203 +788,6 @@ const RoomPage = () => {
 
   // Show meeting room
   if (isJoiningMeeting) {
-    // Mobile layout
-    if (isMobile) {
-      return (
-        <div className="min-h-screen bg-gray-950 text-gray-100 overflow-hidden">
-          {/* Mobile Header */}
-          <div className="fixed top-0 left-0 right-0 z-50 bg-gray-900/95 backdrop-blur-lg border-b border-gray-800 p-4">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center space-x-3">
-                <Shield className="h-6 w-6 text-primary-500" />
-                <div>
-                  <p className="text-sm font-medium text-white">QuantumSync</p>
-                  <p className="text-xs text-gray-400 truncate max-w-[150px]">
-                    {roomId} • {participants.length + 1} online
-                  </p>
-                </div>
-              </div>
-              <div className="flex items-center space-x-2">
-                <button
-                  onClick={copyRoomId}
-                  className="p-2 bg-gray-800 rounded-lg"
-                  title="Copy Room ID"
-                >
-                  <Copy className="h-4 w-4" />
-                </button>
-                <button
-                  onClick={() => setShowParticipants(!showParticipants)}
-                  className="p-2 bg-gray-800 rounded-lg"
-                  title="Participants"
-                >
-                  <Users className="h-4 w-4" />
-                </button>
-              </div>
-            </div>
-          </div>
-
-          {/* Main Content */}
-          <div className="pt-16 pb-24 px-2">
-            <VideoGrid
-              localStream={localStream}
-              remoteStreams={remoteStreams}
-              participants={participants}
-              isVideoEnabled={isVideoEnabled}
-              userName={userName}
-              connectionStatus={connectionStatus}
-              isMobile={true}
-              activeScreenShare={activeScreenShare}
-            />
-          </div>
-
-          {/* Mobile Control Bar */}
-          <div className="fixed bottom-0 left-0 right-0 bg-gray-900/95 backdrop-blur-lg border-t border-gray-800 p-3 z-40">
-            <div className="flex items-center justify-around">
-              <button
-                onClick={toggleVideo}
-                className={`flex flex-col items-center p-3 rounded-lg transition ${
-                  isVideoEnabled && hasCameraAccess
-                    ? "bg-gray-800"
-                    : "bg-red-600"
-                }`}
-                disabled={!hasCameraAccess}
-              >
-                {hasCameraAccess ? (
-                  isVideoEnabled ? (
-                    <Video className="h-5 w-5 text-green-400" />
-                  ) : (
-                    <VideoOff className="h-5 w-5 text-white" />
-                  )
-                ) : (
-                  <CameraOff className="h-5 w-5 text-red-400" />
-                )}
-                <span className="text-xs mt-1 text-gray-300">
-                  {hasCameraAccess
-                    ? isVideoEnabled
-                      ? "Video"
-                      : "Off"
-                    : "No Cam"}
-                </span>
-              </button>
-
-              <button
-                onClick={toggleAudio}
-                className={`flex flex-col items-center p-3 rounded-lg transition ${
-                  isAudioEnabled && hasMicAccess ? "bg-gray-800" : "bg-red-600"
-                }`}
-                disabled={!hasMicAccess}
-              >
-                {hasMicAccess ? (
-                  isAudioEnabled ? (
-                    <Mic className="h-5 w-5 text-green-400" />
-                  ) : (
-                    <MicOff className="h-5 w-5 text-white" />
-                  )
-                ) : (
-                  <MicOff className="h-5 w-5 text-red-400" />
-                )}
-                <span className="text-xs mt-1 text-gray-300">
-                  {hasMicAccess
-                    ? isAudioEnabled
-                      ? "Audio"
-                      : "Muted"
-                    : "No Mic"}
-                </span>
-              </button>
-
-              <button
-                onClick={handleScreenShare}
-                className={`flex flex-col items-center p-3 rounded-lg transition ${
-                  isScreenSharing ? "bg-blue-600" : "bg-gray-800"
-                }`}
-              >
-                <Share2
-                  className={`h-5 w-5 ${
-                    isScreenSharing ? "text-white" : "text-blue-400"
-                  }`}
-                />
-                <span className="text-xs mt-1 text-gray-300">
-                  {isScreenSharing ? "Stop" : "Share"}
-                </span>
-              </button>
-
-              <button
-                onClick={() => setShowChat(!showChat)}
-                className="flex flex-col items-center p-3 rounded-lg bg-gray-800 transition relative"
-              >
-                <MessageSquare className="h-5 w-5 text-purple-400" />
-                <span className="text-xs mt-1 text-gray-300">Chat</span>
-                {messages.length > 0 && (
-                  <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full h-4 w-4 flex items-center justify-center">
-                    {messages.length}
-                  </span>
-                )}
-              </button>
-
-              <button
-                onClick={leaveRoom}
-                className="flex flex-col items-center p-3 rounded-lg bg-red-600 transition"
-              >
-                <Phone className="h-5 w-5 text-white transform rotate-135" />
-                <span className="text-xs mt-1 text-white">Leave</span>
-              </button>
-            </div>
-          </div>
-
-          {/* Mobile Overlay Panels */}
-          {showChat && (
-            <div className="fixed inset-0 bg-gray-950 z-50 pt-16">
-              <div className="h-full flex flex-col">
-                <div className="flex items-center justify-between p-4 border-b border-gray-800">
-                  <h3 className="text-lg font-semibold text-white">Chat</h3>
-                  <button
-                    onClick={() => setShowChat(false)}
-                    className="p-2 hover:bg-gray-800 rounded-lg"
-                  >
-                    <X className="h-5 w-5 text-gray-400" />
-                  </button>
-                </div>
-                <div className="flex-1 overflow-hidden">
-                  <ChatPanel
-                    messages={messages}
-                    onSendMessage={sendMessage}
-                    currentUserId={userId.current}
-                    mobile={true}
-                  />
-                </div>
-              </div>
-            </div>
-          )}
-
-          {showParticipants && (
-            <div className="fixed inset-0 bg-gray-950 z-50 pt-16">
-              <div className="h-full flex flex-col">
-                <div className="flex items-center justify-between p-4 border-b border-gray-800">
-                  <h3 className="text-lg font-semibold text-white">
-                    Participants ({participants.length + 1})
-                  </h3>
-                  <button
-                    onClick={() => setShowParticipants(false)}
-                    className="p-2 hover:bg-gray-800 rounded-lg"
-                  >
-                    <X className="h-5 w-5 text-gray-400" />
-                  </button>
-                </div>
-                <div className="flex-1 overflow-y-auto p-4">
-                  <ParticipantsPanel
-                    participants={participants}
-                    currentUser={{ userId: userId.current, userName }}
-                    mobile={true}
-                  />
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-      );
-    }
-
-    // Desktop layout
     return (
       <div className="min-h-screen bg-gray-950 text-gray-100">
         {/* Header */}
@@ -969,6 +830,15 @@ const RoomPage = () => {
                 </button>
 
                 <button
+                  onClick={refreshConnections}
+                  className="flex items-center space-x-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg transition"
+                  title="Refresh Connections"
+                >
+                  <RefreshCw className="h-4 w-4" />
+                  <span>Refresh</span>
+                </button>
+
+                <button
                   onClick={toggleFullscreen}
                   className="p-2 hover:bg-gray-800 rounded-lg transition"
                   title={isFullscreen ? "Exit Fullscreen" : "Enter Fullscreen"}
@@ -979,31 +849,6 @@ const RoomPage = () => {
                     <Maximize2 className="h-5 w-5" />
                   )}
                 </button>
-
-                <button
-                  onClick={() => setShowParticipants(!showParticipants)}
-                  className={`p-2 rounded-lg transition ${
-                    showParticipants ? "bg-gray-800" : "hover:bg-gray-800"
-                  }`}
-                  title="Participants"
-                >
-                  <Users className="h-5 w-5" />
-                </button>
-
-                <button
-                  onClick={() => setShowChat(!showChat)}
-                  className={`p-2 rounded-lg transition relative ${
-                    showChat ? "bg-gray-800" : "hover:bg-gray-800"
-                  }`}
-                  title="Chat"
-                >
-                  <MessageSquare className="h-5 w-5" />
-                  {messages.length > 0 && (
-                    <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full h-5 w-5 flex items-center justify-center">
-                      {messages.length}
-                    </span>
-                  )}
-                </button>
               </div>
             </div>
           </div>
@@ -1012,11 +857,7 @@ const RoomPage = () => {
         <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
           <div className="flex space-x-6">
             {/* Main Video Area */}
-            <div
-              className={`flex-1 ${
-                showChat || showParticipants ? "lg:w-3/4" : "w-full"
-              }`}
-            >
+            <div className="flex-1">
               <VideoGrid
                 localStream={localStream}
                 remoteStreams={remoteStreams}
@@ -1024,7 +865,7 @@ const RoomPage = () => {
                 isVideoEnabled={isVideoEnabled}
                 userName={userName}
                 connectionStatus={connectionStatus}
-                isMobile={false}
+                isMobile={isMobile}
                 activeScreenShare={activeScreenShare}
               />
 
@@ -1039,53 +880,49 @@ const RoomPage = () => {
                 onToggleFullscreen={toggleFullscreen}
                 hasCameraAccess={hasCameraAccess}
                 hasMicAccess={hasMicAccess}
+                onRefreshConnections={refreshConnections}
               />
             </div>
 
             {/* Side Panels */}
-            {(showChat || showParticipants) && (
-              <div className="space-y-6 lg:w-1/4">
-                {showParticipants && (
-                  <div className="relative">
-                    <button
-                      onClick={() => setShowParticipants(false)}
-                      className="absolute top-2 right-2 p-1 hover:bg-gray-800 rounded-lg z-10"
-                    >
-                      <X className="h-4 w-4" />
-                    </button>
-                    <ParticipantsPanel
-                      participants={participants}
-                      currentUser={{ userId: userId.current, userName }}
-                      mobile={false}
-                    />
-                  </div>
-                )}
-
-                {showChat && (
-                  <div className="relative">
-                    <button
-                      onClick={() => setShowChat(false)}
-                      className="absolute top-2 right-2 p-1 hover:bg-gray-800 rounded-lg z-10"
-                    >
-                      <X className="h-4 w-4" />
-                    </button>
-                    <ChatPanel
-                      messages={messages}
-                      onSendMessage={sendMessage}
-                      currentUserId={userId.current}
-                      mobile={false}
-                    />
-                  </div>
-                )}
+            <div className="w-80 space-y-6">
+              <div className="bg-gray-900/80 backdrop-blur-sm rounded-xl p-4">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="font-semibold text-white">
+                    Participants ({participants.length + 1})
+                  </h3>
+                  <Users className="h-5 w-5 text-gray-400" />
+                </div>
+                <ParticipantsPanel
+                  participants={participants}
+                  currentUser={{ userId: userId.current, userName }}
+                  mobile={false}
+                />
               </div>
-            )}
+
+              <div className="bg-gray-900/80 backdrop-blur-sm rounded-xl p-4">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="font-semibold text-white">Chat</h3>
+                  <MessageSquare className="h-5 w-5 text-gray-400" />
+                </div>
+                <ChatPanel
+                  messages={messages}
+                  onSendMessage={sendMessage}
+                  currentUserId={userId.current}
+                  mobile={false}
+                />
+              </div>
+            </div>
           </div>
         </main>
+
+        {/* Debug Panel */}
+        {renderDebugPanel()}
       </div>
     );
   }
 
-  // Initial loading state (shown while waiting for socket)
+  // Initial loading state
   if (!roomReady) {
     return (
       <div className="min-h-screen bg-gray-950 flex items-center justify-center p-4">
@@ -1112,7 +949,6 @@ const RoomPage = () => {
     );
   }
 
-  // This shouldn't happen, but just in case
   return null;
 };
 
