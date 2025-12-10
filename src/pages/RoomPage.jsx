@@ -46,7 +46,7 @@ const RoomPage = () => {
   const [showChat, setShowChat] = useState(false);
   const [showParticipants, setShowParticipants] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [connectionStatus, setConnectionStatus] = useState("initializing");
+  const [connectionStatus, setConnectionStatus] = useState("connecting");
   const [isMobile, setIsMobile] = useState(false);
   const [hasCameraAccess, setHasCameraAccess] = useState(false);
   const [hasMicAccess, setHasMicAccess] = useState(false);
@@ -98,6 +98,7 @@ const RoomPage = () => {
   const initializeMedia = useCallback(async () => {
     try {
       setConnectionStatus("requesting-media");
+      console.log("🎥 Initializing media...");
 
       const constraints = {
         video: {
@@ -114,6 +115,7 @@ const RoomPage = () => {
       };
 
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      console.log("✅ Media stream obtained");
 
       const videoTrack = stream.getVideoTracks()[0];
       const audioTrack = stream.getAudioTracks()[0];
@@ -121,41 +123,32 @@ const RoomPage = () => {
       setHasCameraAccess(!!videoTrack);
       setHasMicAccess(!!audioTrack);
 
-      if (videoTrack) videoTrack.enabled = isVideoEnabled;
-      if (audioTrack) audioTrack.enabled = isAudioEnabled;
+      if (videoTrack) {
+        videoTrack.enabled = isVideoEnabled;
+        console.log(
+          `📹 Video track: ${videoTrack.enabled ? "enabled" : "disabled"}`
+        );
+      }
+      if (audioTrack) {
+        audioTrack.enabled = isAudioEnabled;
+        console.log(
+          `🎤 Audio track: ${audioTrack.enabled ? "enabled" : "disabled"}`
+        );
+      }
 
       setLocalStream(stream);
       localStreamRef.current = stream;
       setConnectionStatus("connected");
 
-      // Add tracks to existing peer connections if any
-      peerConnections.forEach((pc) => {
-        if (pc.connectionState !== "closed") {
-          stream.getTracks().forEach((track) => {
-            const sender = pc
-              .getSenders()
-              .find((s) => s.track?.kind === track.kind);
-            if (!sender) {
-              try {
-                pc.addTrack(track, stream);
-              } catch (err) {
-                console.warn("Failed to add track:", err);
-              }
-            }
-          });
-        }
-      });
-
       toast.success("Camera and microphone ready!");
       return stream;
     } catch (error) {
-      console.error("Media error:", error);
+      console.error("❌ Media error:", error);
 
       if (
         error.name === "NotAllowedError" ||
         error.name === "PermissionDeniedError"
       ) {
-        // Continue without media
         setHasCameraAccess(false);
         setHasMicAccess(false);
         setConnectionStatus("connected");
@@ -167,34 +160,28 @@ const RoomPage = () => {
         return null;
       }
     }
-  }, [isVideoEnabled, isAudioEnabled, peerConnections]);
+  }, [isVideoEnabled, isAudioEnabled]);
 
   // Create peer connection
   const createPeerConnection = useCallback(
     (targetUserId) => {
       try {
+        console.log(`🔗 Creating peer connection with ${targetUserId}`);
+
         // Close existing connection if any
         const existingPc = peerConnections.get(targetUserId);
         if (existingPc) {
+          console.log(`Closing existing connection with ${targetUserId}`);
           existingPc.close();
         }
 
         const pc = new RTCPeerConnection(configuration);
 
-        // Handle negotiation needed
-        pc.onnegotiationneeded = () => {
-          console.log(`Negotiation needed with ${targetUserId}`);
-          sendOffer(pc, targetUserId);
-        };
-
         // Add local tracks if available
         if (localStreamRef.current) {
           localStreamRef.current.getTracks().forEach((track) => {
-            if (track.kind === "video" && !isVideoEnabled && !isScreenSharing)
-              return;
-            if (track.kind === "audio" && !isAudioEnabled) return;
-
             try {
+              console.log(`Adding ${track.kind} track to ${targetUserId}`);
               pc.addTrack(track, localStreamRef.current);
             } catch (err) {
               console.warn(`Failed to add ${track.kind} track:`, err);
@@ -204,7 +191,7 @@ const RoomPage = () => {
 
         // Handle remote tracks
         pc.ontrack = (event) => {
-          console.log(`Received track from ${targetUserId}`, event.streams);
+          console.log(`📹 Received track from ${targetUserId}`, event.streams);
           if (event.streams && event.streams[0]) {
             setRemoteStreams((prev) => {
               const newMap = new Map(prev);
@@ -228,23 +215,26 @@ const RoomPage = () => {
         // Connection state monitoring
         pc.oniceconnectionstatechange = () => {
           const state = pc.iceConnectionState;
-          console.log(`ICE state with ${targetUserId}:`, state);
+          console.log(`🌐 ICE state with ${targetUserId}: ${state}`);
 
           if (state === "connected" || state === "completed") {
             console.log(`✅ Connected to ${targetUserId}`);
+            toast.success(`Connected to participant`);
           } else if (state === "failed") {
-            console.log(
-              `❌ Connection failed with ${targetUserId}, restarting ICE...`
-            );
-            // Try to restart ICE
+            console.log(`❌ Connection failed with ${targetUserId}`);
+            // Try to reconnect after 2 seconds
             setTimeout(() => {
-              if (isMountedRef.current && peerConnections.has(targetUserId)) {
+              if (
+                isMountedRef.current &&
+                participants.some((p) => p.userId === targetUserId)
+              ) {
+                console.log(`🔄 Retrying connection with ${targetUserId}`);
                 const newPc = createPeerConnection(targetUserId);
                 if (newPc) {
-                  sendOffer(newPc, targetUserId);
+                  createOffer(newPc, targetUserId);
                 }
               }
-            }, 1000);
+            }, 2000);
           }
         };
 
@@ -261,43 +251,39 @@ const RoomPage = () => {
         return null;
       }
     },
-    [
-      socket,
-      configuration,
-      isVideoEnabled,
-      isAudioEnabled,
-      isScreenSharing,
-      peerConnections,
-    ]
+    [socket, configuration, peerConnections, participants]
   );
 
-  // Send offer to a participant
-  const sendOffer = async (pc, targetUserId) => {
+  // Create and send offer
+  const createOffer = async (pc, targetUserId) => {
     try {
+      console.log(`📤 Creating offer for ${targetUserId}`);
       const offer = await pc.createOffer({
         offerToReceiveAudio: true,
         offerToReceiveVideo: true,
       });
       await pc.setLocalDescription(offer);
 
-      socket.emit("offer", {
-        offer: pc.localDescription,
-        to: targetUserId,
-        from: userId.current,
-      });
+      if (socket?.connected) {
+        socket.emit("offer", {
+          offer: pc.localDescription,
+          to: targetUserId,
+          from: userId.current,
+        });
+      }
     } catch (error) {
-      console.error("Error sending offer:", error);
+      console.error("Error creating offer:", error);
     }
   };
 
   // Setup socket and room
   useEffect(() => {
     if (!socket || !isConnected) {
-      console.log("Waiting for socket connection...");
+      console.log("⌛ Waiting for socket connection...");
       return;
     }
 
-    console.log(`Joining room: ${roomId}`);
+    console.log(`🚀 Joining room: ${roomId}`);
     socket.emit("join-room", {
       roomId,
       userId: userId.current,
@@ -308,10 +294,7 @@ const RoomPage = () => {
     const handleRoomJoined = ({ participants: existingParticipants }) => {
       if (!isMountedRef.current) return;
 
-      console.log(
-        "Room joined, existing participants:",
-        existingParticipants.length
-      );
+      console.log("✅ Room joined, participants:", existingParticipants.length);
       setParticipants(existingParticipants);
       setRoomReady(true);
       setShowPermissionOverlay(true);
@@ -321,7 +304,7 @@ const RoomPage = () => {
       if (!isMountedRef.current || participant.userId === userId.current)
         return;
 
-      console.log(`New user joined: ${participant.userName}`);
+      console.log(`👤 New user joined: ${participant.userName}`);
       setParticipants((prev) => {
         const exists = prev.some((p) => p.userId === participant.userId);
         if (exists) return prev;
@@ -332,7 +315,7 @@ const RoomPage = () => {
     const handleUserLeft = ({ userId: leftUserId }) => {
       if (!isMountedRef.current) return;
 
-      console.log(`User left: ${leftUserId}`);
+      console.log(`👋 User left: ${leftUserId}`);
       setParticipants((prev) => prev.filter((p) => p.userId !== leftUserId));
 
       // Cleanup
@@ -352,9 +335,9 @@ const RoomPage = () => {
     };
 
     const handleOffer = async ({ offer, from }) => {
-      if (!isMountedRef.current) return;
+      if (!isMountedRef.current || from === userId.current) return;
 
-      console.log(`Received offer from ${from}`);
+      console.log(`📨 Received offer from ${from}`);
       let pc = peerConnections.get(from);
       if (!pc) {
         pc = createPeerConnection(from);
@@ -376,7 +359,7 @@ const RoomPage = () => {
     };
 
     const handleAnswer = async ({ answer, from }) => {
-      console.log(`Received answer from ${from}`);
+      console.log(`📨 Received answer from ${from}`);
       const pc = peerConnections.get(from);
       if (pc) {
         try {
@@ -440,34 +423,36 @@ const RoomPage = () => {
         screenStreamRef.current.getTracks().forEach((track) => track.stop());
       }
     };
-  }, [socket, isConnected, roomId, userName]);
+  }, [socket, isConnected, roomId, userName, createPeerConnection]);
 
   // Handle permission decision
   const handlePermissionDecision = async (allowCamera) => {
     setShowPermissionOverlay(false);
+    setIsJoiningMeeting(true);
 
+    let stream = null;
     if (allowCamera) {
-      await initializeMedia();
+      stream = await initializeMedia();
     } else {
       setHasCameraAccess(false);
       setHasMicAccess(false);
       setConnectionStatus("connected");
     }
 
-    setIsJoiningMeeting(true);
-
-    // Now create connections with existing participants
-    participants.forEach((participant, index) => {
-      if (participant.userId !== userId.current) {
-        setTimeout(() => {
-          if (!isMountedRef.current) return;
-          const pc = createPeerConnection(participant.userId);
-          if (pc) {
-            sendOffer(pc, participant.userId);
-          }
-        }, index * 500);
-      }
-    });
+    // Connect to existing participants
+    setTimeout(() => {
+      console.log(`🔗 Connecting to ${participants.length} participants...`);
+      participants.forEach((participant, index) => {
+        if (participant.userId !== userId.current) {
+          setTimeout(() => {
+            const pc = createPeerConnection(participant.userId);
+            if (pc) {
+              createOffer(pc, participant.userId);
+            }
+          }, index * 1000); // Stagger connections
+        }
+      });
+    }, 1000);
   };
 
   // Control functions
@@ -483,6 +468,7 @@ const RoomPage = () => {
       videoTrack.enabled = newState;
       setIsVideoEnabled(newState);
 
+      // Update all peer connections
       peerConnections.forEach((pc) => {
         const sender = pc.getSenders().find((s) => s.track?.kind === "video");
         if (sender && videoTrack) {
@@ -508,6 +494,7 @@ const RoomPage = () => {
       audioTrack.enabled = newState;
       setIsAudioEnabled(newState);
 
+      // Update all peer connections
       peerConnections.forEach((pc) => {
         const sender = pc.getSenders().find((s) => s.track?.kind === "audio");
         if (sender && audioTrack) {
@@ -534,12 +521,12 @@ const RoomPage = () => {
         setActiveScreenShare(userId.current);
 
         const screenTrack = screenStream.getVideoTracks()[0];
+
+        // Replace video track with screen share track in all connections
         peerConnections.forEach((pc) => {
           const sender = pc.getSenders().find((s) => s.track?.kind === "video");
           if (sender && screenTrack) {
             sender.replaceTrack(screenTrack);
-          } else if (screenTrack) {
-            pc.addTrack(screenTrack, screenStreamRef.current);
           }
         });
 
@@ -563,7 +550,7 @@ const RoomPage = () => {
 
         peerConnections.forEach((pc) => {
           const sender = pc.getSenders().find((s) => s.track?.kind === "video");
-          if (sender) {
+          if (sender && replacementTrack) {
             sender.replaceTrack(replacementTrack);
           }
         });

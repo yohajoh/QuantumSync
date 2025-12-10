@@ -1,6 +1,11 @@
-import React, { createContext, useContext, useEffect, useState } from "react";
-import { io } from "socket.io-client";
-import toast from "react-hot-toast";
+import React, {
+  createContext,
+  useContext,
+  useState,
+  useEffect,
+  useRef,
+} from "react";
+import io from "socket.io-client";
 
 const SocketContext = createContext(null);
 
@@ -15,37 +20,46 @@ export const useSocket = () => {
 export const SocketProvider = ({ children }) => {
   const [socket, setSocket] = useState(null);
   const [isConnected, setIsConnected] = useState(false);
+  const socketRef = useRef(null);
 
   useEffect(() => {
-    const socketInstance = io(
-      import.meta.env.VITE_SOCKET_URL || "http://localhost:5000",
-      {
-        transports: ["websocket", "polling"],
-        reconnection: true,
-        reconnectionAttempts: 5,
-        reconnectionDelay: 1000,
-      }
-    );
+    // Initialize socket connection
+    const socketUrl =
+      process.env.REACT_APP_SOCKET_URL || "http://localhost:5000";
+
+    console.log("🔌 Connecting to socket server:", socketUrl);
+
+    const socketInstance = io(socketUrl, {
+      transports: ["websocket", "polling"],
+      reconnection: true,
+      reconnectionAttempts: 5,
+      reconnectionDelay: 1000,
+    });
+
+    socketRef.current = socketInstance;
 
     socketInstance.on("connect", () => {
+      console.log("✅ Socket connected:", socketInstance.id);
       setIsConnected(true);
-      console.log("Connected to socket server");
     });
 
     socketInstance.on("disconnect", () => {
+      console.log("❌ Socket disconnected");
       setIsConnected(false);
-      toast.error("Disconnected from server");
     });
 
     socketInstance.on("connect_error", (error) => {
-      console.error("Connection error:", error);
-      toast.error("Connection error. Please refresh.");
+      console.error("❌ Socket connection error:", error);
+      setIsConnected(false);
     });
 
     setSocket(socketInstance);
 
+    // Cleanup
     return () => {
-      socketInstance.disconnect();
+      if (socketInstance) {
+        socketInstance.disconnect();
+      }
     };
   }, []);
 
