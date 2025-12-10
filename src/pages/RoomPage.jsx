@@ -56,18 +56,22 @@ const RoomPage = () => {
   const [isJoiningMeeting, setIsJoiningMeeting] = useState(false);
   const [roomReady, setRoomReady] = useState(false);
   const [debugInfo, setDebugInfo] = useState("");
+  const [hasJoinedRoom, setHasJoinedRoom] = useState(false);
 
   // Store references
   const localStreamRef = useRef(null);
   const screenStreamRef = useRef(null);
   const isMountedRef = useRef(true);
   const pendingIceCandidates = useRef(new Map());
+  const socketInitializedRef = useRef(false);
 
   // Debug logging
-  const addDebugLog = (message) => {
-    console.log(`[${new Date().toLocaleTimeString()}] ${message}`);
+  const addDebugLog = useCallback((message) => {
+    const timestamp = new Date().toLocaleTimeString();
+    const logMessage = `[${timestamp}] ${message}`;
+    console.log(logMessage);
     setDebugInfo(message);
-  };
+  }, []);
 
   // Check if mobile
   useEffect(() => {
@@ -160,7 +164,7 @@ const RoomPage = () => {
         return null;
       }
     }
-  }, [isVideoEnabled, isAudioEnabled]);
+  }, [isVideoEnabled, isAudioEnabled, addDebugLog]);
 
   // Create peer connection
   const createPeerConnection = useCallback(
@@ -177,13 +181,6 @@ const RoomPage = () => {
 
         const pc = new RTCPeerConnection(configuration);
 
-        // Track stats
-        const stats = {
-          iceState: "new",
-          connectionState: "new",
-          tracksReceived: 0,
-        };
-
         // Add local tracks if available
         if (localStreamRef.current) {
           localStreamRef.current.getTracks().forEach((track) => {
@@ -196,12 +193,11 @@ const RoomPage = () => {
           });
         }
 
-        // Handle remote tracks - FIXED THIS PART
+        // Handle remote tracks
         pc.ontrack = (event) => {
           addDebugLog(
             `Received ${event.track.kind} track from ${targetUserId}`
           );
-          stats.tracksReceived++;
 
           if (event.streams && event.streams.length > 0) {
             const stream = event.streams[0];
@@ -219,17 +215,6 @@ const RoomPage = () => {
               newMap.set(targetUserId, stream);
               return newMap;
             });
-
-            // Force re-render by updating state
-            setTimeout(() => {
-              if (isMountedRef.current) {
-                setRemoteStreams((newMap) => {
-                  const updatedMap = new Map(newMap);
-                  updatedMap.set(targetUserId, stream);
-                  return updatedMap;
-                });
-              }
-            }, 100);
           }
         };
 
@@ -247,7 +232,6 @@ const RoomPage = () => {
         // Connection state monitoring
         pc.oniceconnectionstatechange = () => {
           const state = pc.iceConnectionState;
-          stats.iceState = state;
           addDebugLog(`ICE state with ${targetUserId}: ${state}`);
 
           if (state === "connected" || state === "completed") {
@@ -275,7 +259,6 @@ const RoomPage = () => {
         };
 
         pc.onconnectionstatechange = () => {
-          stats.connectionState = pc.connectionState;
           addDebugLog(
             `Connection state with ${targetUserId}: ${pc.connectionState}`
           );
@@ -297,7 +280,7 @@ const RoomPage = () => {
         return null;
       }
     },
-    [socket, configuration, peerConnections]
+    [socket, configuration, peerConnections, addDebugLog]
   );
 
   // Create and send offer
@@ -323,167 +306,195 @@ const RoomPage = () => {
     }
   };
 
-  // Setup socket and room
+  // Setup socket and room - FIXED: Added dependency check
   useEffect(() => {
-    if (!socket || !isConnected) {
-      addDebugLog("Waiting for socket connection...");
+    // Don't run if already joined room
+    if (hasJoinedRoom || !socket || !isConnected) {
       return;
     }
 
-    addDebugLog(`Joining room: ${roomId}`);
-    socket.emit("join-room", {
-      roomId,
-      userId: userId.current,
-      userName,
-    });
-
-    // Setup socket event handlers
-    const handleRoomJoined = ({ participants: existingParticipants }) => {
-      if (!isMountedRef.current) return;
-
-      addDebugLog(`Room joined. Participants: ${existingParticipants.length}`);
-      setParticipants(existingParticipants);
-      setRoomReady(true);
-      setShowPermissionOverlay(true);
-    };
-
-    const handleUserJoined = (participant) => {
-      if (!isMountedRef.current || participant.userId === userId.current)
-        return;
-
-      addDebugLog(`New user joined: ${participant.userName}`);
-      setParticipants((prev) => {
-        const exists = prev.some((p) => p.userId === participant.userId);
-        if (exists) return prev;
-        return [...prev, participant];
+    const setupSocketEvents = () => {
+      addDebugLog(`Joining room: ${roomId}`);
+      socket.emit("join-room", {
+        roomId,
+        userId: userId.current,
+        userName,
       });
 
-      // Connect to new user if we're already in the meeting
-      if (isJoiningMeeting) {
-        setTimeout(() => {
-          const pc = createPeerConnection(participant.userId);
-          if (pc) {
-            createOffer(pc, participant.userId);
-          }
-        }, 1000);
-      }
-    };
+      // Setup socket event handlers
+      const handleRoomJoined = ({ participants: existingParticipants }) => {
+        if (!isMountedRef.current) return;
 
-    const handleUserLeft = ({ userId: leftUserId }) => {
-      if (!isMountedRef.current) return;
+        addDebugLog(
+          `Room joined. Participants: ${existingParticipants.length}`
+        );
+        setParticipants(existingParticipants);
+        setRoomReady(true);
+        setShowPermissionOverlay(true);
+        setHasJoinedRoom(true);
+      };
 
-      addDebugLog(`User left: ${leftUserId}`);
-      setParticipants((prev) => prev.filter((p) => p.userId !== leftUserId));
+      const handleUserJoined = (participant) => {
+        if (!isMountedRef.current || participant.userId === userId.current)
+          return;
 
-      // Cleanup
-      setPeerConnections((prev) => {
-        const newMap = new Map(prev);
-        const pc = newMap.get(leftUserId);
-        if (pc) {
-          addDebugLog(`Closing PC for ${leftUserId}`);
-          pc.close();
-        }
-        newMap.delete(leftUserId);
-        return newMap;
-      });
-
-      setRemoteStreams((prev) => {
-        const newMap = new Map(prev);
-        newMap.delete(leftUserId);
-        return newMap;
-      });
-
-      pendingIceCandidates.current.delete(leftUserId);
-    };
-
-    const handleOffer = async ({ offer, from }) => {
-      if (!isMountedRef.current || from === userId.current) return;
-
-      addDebugLog(`Received offer from ${from}`);
-      let pc = peerConnections.get(from);
-      if (!pc) {
-        pc = createPeerConnection(from);
-      }
-
-      try {
-        await pc.setRemoteDescription(new RTCSessionDescription(offer));
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-
-        socket.emit("answer", {
-          answer: pc.localDescription,
-          to: from,
-          from: userId.current,
+        addDebugLog(`New user joined: ${participant.userName}`);
+        setParticipants((prev) => {
+          const exists = prev.some((p) => p.userId === participant.userId);
+          if (exists) return prev;
+          return [...prev, participant];
         });
-        addDebugLog(`Sent answer to ${from}`);
-      } catch (error) {
-        console.error("Error handling offer:", error);
-        addDebugLog(`Offer handling error: ${error.message}`);
-      }
-    };
 
-    const handleAnswer = async ({ answer, from }) => {
-      addDebugLog(`Received answer from ${from}`);
-      const pc = peerConnections.get(from);
-      if (pc) {
-        try {
-          await pc.setRemoteDescription(new RTCSessionDescription(answer));
-          addDebugLog(`Answer accepted from ${from}`);
-        } catch (error) {
-          console.error("Error handling answer:", error);
-          addDebugLog(`Answer error: ${error.message}`);
+        // Connect to new user if we're already in the meeting
+        if (isJoiningMeeting) {
+          setTimeout(() => {
+            const pc = createPeerConnection(participant.userId);
+            if (pc) {
+              createOffer(pc, participant.userId);
+            }
+          }, 1000);
         }
-      }
-    };
+      };
 
-    const handleIceCandidate = async ({ candidate, from }) => {
-      const pc = peerConnections.get(from);
-      if (pc) {
-        try {
-          if (pc.remoteDescription) {
-            await pc.addIceCandidate(new RTCIceCandidate(candidate));
-          } else {
-            // Store candidate until remote description is set
-            const pending = pendingIceCandidates.current.get(from) || [];
-            pending.push(new RTCIceCandidate(candidate));
-            pendingIceCandidates.current.set(from, pending);
-            addDebugLog(`Queued ICE candidate from ${from}`);
+      const handleUserLeft = ({ userId: leftUserId }) => {
+        if (!isMountedRef.current) return;
+
+        addDebugLog(`User left: ${leftUserId}`);
+        setParticipants((prev) => prev.filter((p) => p.userId !== leftUserId));
+
+        // Cleanup
+        setPeerConnections((prev) => {
+          const newMap = new Map(prev);
+          const pc = newMap.get(leftUserId);
+          if (pc) {
+            addDebugLog(`Closing PC for ${leftUserId}`);
+            pc.close();
           }
-        } catch (error) {
-          console.error("Error adding ICE candidate:", error);
+          newMap.delete(leftUserId);
+          return newMap;
+        });
+
+        setRemoteStreams((prev) => {
+          const newMap = new Map(prev);
+          newMap.delete(leftUserId);
+          return newMap;
+        });
+
+        pendingIceCandidates.current.delete(leftUserId);
+      };
+
+      const handleOffer = async ({ offer, from }) => {
+        if (!isMountedRef.current || from === userId.current) return;
+
+        addDebugLog(`Received offer from ${from}`);
+        let pc = peerConnections.get(from);
+        if (!pc) {
+          pc = createPeerConnection(from);
         }
-      }
+
+        try {
+          await pc.setRemoteDescription(new RTCSessionDescription(offer));
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+
+          socket.emit("answer", {
+            answer: pc.localDescription,
+            to: from,
+            from: userId.current,
+          });
+          addDebugLog(`Sent answer to ${from}`);
+        } catch (error) {
+          console.error("Error handling offer:", error);
+          addDebugLog(`Offer handling error: ${error.message}`);
+        }
+      };
+
+      const handleAnswer = async ({ answer, from }) => {
+        addDebugLog(`Received answer from ${from}`);
+        const pc = peerConnections.get(from);
+        if (pc) {
+          try {
+            await pc.setRemoteDescription(new RTCSessionDescription(answer));
+            addDebugLog(`Answer accepted from ${from}`);
+          } catch (error) {
+            console.error("Error handling answer:", error);
+            addDebugLog(`Answer error: ${error.message}`);
+          }
+        }
+      };
+
+      const handleIceCandidate = async ({ candidate, from }) => {
+        const pc = peerConnections.get(from);
+        if (pc) {
+          try {
+            if (pc.remoteDescription) {
+              await pc.addIceCandidate(new RTCIceCandidate(candidate));
+            } else {
+              // Store candidate until remote description is set
+              const pending = pendingIceCandidates.current.get(from) || [];
+              pending.push(new RTCIceCandidate(candidate));
+              pendingIceCandidates.current.set(from, pending);
+              addDebugLog(`Queued ICE candidate from ${from}`);
+            }
+          } catch (error) {
+            console.error("Error adding ICE candidate:", error);
+          }
+        }
+      };
+
+      const handleNewMessage = (message) => {
+        if (isMountedRef.current) {
+          setMessages((prev) => [...prev, message]);
+        }
+      };
+
+      // Attach all handlers
+      socket.on("room-joined", handleRoomJoined);
+      socket.on("user-joined", handleUserJoined);
+      socket.on("user-left", handleUserLeft);
+      socket.on("offer", handleOffer);
+      socket.on("answer", handleAnswer);
+      socket.on("ice-candidate", handleIceCandidate);
+      socket.on("new-message", handleNewMessage);
+
+      // Return cleanup function
+      return () => {
+        if (socket) {
+          socket.off("room-joined");
+          socket.off("user-joined");
+          socket.off("user-left");
+          socket.off("offer");
+          socket.off("answer");
+          socket.off("ice-candidate");
+          socket.off("new-message");
+        }
+      };
     };
 
-    const handleNewMessage = (message) => {
-      if (isMountedRef.current) {
-        setMessages((prev) => [...prev, message]);
-      }
+    const cleanup = setupSocketEvents();
+
+    // Return cleanup function
+    return () => {
+      if (cleanup) cleanup();
     };
+  }, [
+    socket,
+    isConnected,
+    roomId,
+    userName,
+    isJoiningMeeting,
+    createPeerConnection,
+    addDebugLog,
+    hasJoinedRoom,
+  ]);
 
-    // Attach all handlers
-    socket.on("room-joined", handleRoomJoined);
-    socket.on("user-joined", handleUserJoined);
-    socket.on("user-left", handleUserLeft);
-    socket.on("offer", handleOffer);
-    socket.on("answer", handleAnswer);
-    socket.on("ice-candidate", handleIceCandidate);
-    socket.on("new-message", handleNewMessage);
-
-    // Cleanup
+  // Cleanup on component unmount
+  useEffect(() => {
     return () => {
       isMountedRef.current = false;
-      addDebugLog("Cleaning up...");
+      addDebugLog("Component unmounting...");
 
-      if (socket) {
-        socket.off("room-joined");
-        socket.off("user-joined");
-        socket.off("user-left");
-        socket.off("offer");
-        socket.off("answer");
-        socket.off("ice-candidate");
-        socket.off("new-message");
-
+      if (socket && hasJoinedRoom) {
         socket.emit("leave-room", { roomId, userId: userId.current });
       }
 
@@ -501,14 +512,7 @@ const RoomPage = () => {
         screenStreamRef.current.getTracks().forEach((track) => track.stop());
       }
     };
-  }, [
-    socket,
-    isConnected,
-    roomId,
-    userName,
-    isJoiningMeeting,
-    createPeerConnection,
-  ]);
+  }, [socket, roomId, hasJoinedRoom, addDebugLog]);
 
   // Handle permission decision
   const handlePermissionDecision = async (allowCamera) => {
@@ -951,5 +955,6 @@ const RoomPage = () => {
 
   return null;
 };
+// nnnnnnn
 
 export default RoomPage;
