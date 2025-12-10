@@ -89,7 +89,7 @@ const ChatPanel = ({
               </p>
             </div>
           </div>
-          {!mobile && (
+          {/* {!mobile && (
             <div className="flex items-center space-x-2">
               <button
                 type="button"
@@ -106,7 +106,7 @@ const ChatPanel = ({
                 <Smile className="h-5 w-5 text-gray-400" />
               </button>
             </div>
-          )}
+          )} */}
         </div>
       </div>
 
@@ -223,25 +223,25 @@ const ChatPanel = ({
         } p-4`}
       >
         <div className="flex items-center space-x-2">
-          {!mobile && (
-            <>
-              <button
-                type="button"
-                className="p-2 hover:bg-gray-800 rounded-lg transition"
-                title="Attach file"
-              >
-                <Paperclip className="h-5 w-5 text-gray-400" />
-              </button>
+          {/* {!mobile && (
+            // <>
+            //   <button
+            //     type="button"
+            //     className="p-2 hover:bg-gray-800 rounded-lg transition"
+            //     title="Attach file"
+            //   >
+            //     <Paperclip className="h-5 w-5 text-gray-400" />
+            //   </button>
 
-              <button
-                type="button"
-                className="p-2 hover:bg-gray-800 rounded-lg transition"
-                title="Emoji"
-              >
-                <Smile className="h-5 w-5 text-gray-400" />
-              </button>
-            </>
-          )}
+            //   <button
+            //     type="button"
+            //     className="p-2 hover:bg-gray-800 rounded-lg transition"
+            //     title="Emoji"
+            //   >
+            //     <Smile className="h-5 w-5 text-gray-400" />
+            //   </button>
+            // </>
+          )} */}
 
           <input
             ref={inputRef}
