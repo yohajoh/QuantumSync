@@ -29,7 +29,8 @@ export const SocketProvider = ({ children }) => {
 
     socketInstance.on("connect", () => {
       setIsConnected(true);
-      console.log("Connected to socket server");
+      console.log("✅ Connected to socket server");
+      toast.success("Connected to server");
     });
 
     socketInstance.on("disconnect", () => {
@@ -45,7 +46,9 @@ export const SocketProvider = ({ children }) => {
     setSocket(socketInstance);
 
     return () => {
-      socketInstance.disconnect();
+      if (socketInstance) {
+        socketInstance.disconnect();
+      }
     };
   }, []);
 

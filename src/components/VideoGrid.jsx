@@ -20,46 +20,72 @@ const VideoGrid = ({
   isMobile = false,
   activeScreenShare = null,
 }) => {
-  const localVideoRef = useRef();
+  const localVideoRef = useRef(null);
   const remoteVideoRefs = useRef(new Map());
   const [gridConfig, setGridConfig] = useState({
     cols: "grid-cols-1",
     aspect: "aspect-video",
   });
 
-  // Handle local video
+  // Handle local video - FIXED
   useEffect(() => {
     if (localVideoRef.current && localStream) {
+      console.log("Setting local video stream");
       localVideoRef.current.srcObject = localStream;
+
+      // Ensure the video plays
+      localVideoRef.current.play().catch((e) => {
+        console.log("Video play error:", e);
+      });
+
       const videoTrack = localStream.getVideoTracks()[0];
       if (videoTrack) {
         videoTrack.enabled = isVideoEnabled;
+        console.log(`Local video track enabled: ${videoTrack.enabled}`);
       }
     }
   }, [localStream, isVideoEnabled]);
 
-  // Handle remote videos
+  // Handle remote videos - FIXED
   useEffect(() => {
     remoteStreams.forEach((stream, userId) => {
       const videoElement = remoteVideoRefs.current.get(userId);
       if (videoElement && stream && videoElement.srcObject !== stream) {
+        console.log(`Setting remote video for ${userId}`);
         videoElement.srcObject = stream;
+
+        // Ensure the video plays
+        videoElement.play().catch((e) => {
+          console.log(`Remote video play error for ${userId}:`, e);
+        });
+      }
+    });
+
+    // Clean up removed streams
+    const currentUserIds = Array.from(remoteStreams.keys());
+    const existingUserIds = Array.from(remoteVideoRefs.current.keys());
+
+    existingUserIds.forEach((userId) => {
+      if (!currentUserIds.includes(userId)) {
+        const videoElement = remoteVideoRefs.current.get(userId);
+        if (videoElement) {
+          videoElement.srcObject = null;
+        }
+        remoteVideoRefs.current.delete(userId);
       }
     });
   }, [remoteStreams]);
 
-  // Calculate dynamic grid based on participant count
+  // Calculate dynamic grid based on participant count - remains the same
   useEffect(() => {
-    const totalParticipants = participants.length + 1; // +1 for local user
+    const totalParticipants = participants.length + 1;
 
     let cols, aspect;
 
     if (isMobile) {
-      // Mobile: Always single column with scrolling
       cols = "grid-cols-1";
       aspect = "aspect-[3/4]";
     } else {
-      // Desktop: Dynamic grid based on count
       switch (true) {
         case totalParticipants === 1:
           cols = "grid-cols-1";
@@ -86,7 +112,6 @@ const VideoGrid = ({
           aspect = "aspect-square";
           break;
         default:
-          // More than 12: Scrollable grid
           cols = "grid-cols-4 lg:grid-cols-6";
           aspect = "aspect-square";
       }
@@ -103,7 +128,8 @@ const VideoGrid = ({
       videoEnabled: isVideoEnabled,
       audioEnabled: true,
       isLocal: true,
-      isScreenSharing: activeScreenShare === "local",
+      isScreenSharing:
+        activeScreenShare === userId.current || activeScreenShare === "local",
     },
     ...participants.map((p) => ({
       ...p,
@@ -113,7 +139,7 @@ const VideoGrid = ({
     })),
   ];
 
-  // Sort participants: screen sharers first, then video enabled, then others
+  // Sort participants
   const sortedParticipants = [...allParticipants].sort((a, b) => {
     if (a.isScreenSharing && !b.isScreenSharing) return -1;
     if (!a.isScreenSharing && b.isScreenSharing) return 1;
@@ -146,7 +172,13 @@ const VideoGrid = ({
           <div className="flex items-center space-x-1 text-sm text-gray-400">
             <Video className="h-4 w-4" />
             <span>
-              {allParticipants.filter((p) => p.videoEnabled).length} cameras
+              {
+                allParticipants.filter(
+                  (p) =>
+                    p.videoEnabled || p.stream?.getVideoTracks()?.length > 0
+                ).length
+              }{" "}
+              cameras
             </span>
           </div>
           {activeScreenShare && (
@@ -208,16 +240,13 @@ const VideoGrid = ({
 
                 {/* Video Container */}
                 <div className="absolute inset-0 bg-gray-950">
-                  {hasStream && videoTrack ? (
+                  {hasStream ? (
                     <video
                       ref={
                         participant.isLocal
                           ? localVideoRef
                           : (el) => {
-                              if (
-                                el &&
-                                !remoteVideoRefs.current.has(participant.userId)
-                              ) {
+                              if (el) {
                                 remoteVideoRefs.current.set(
                                   participant.userId,
                                   el
@@ -228,11 +257,7 @@ const VideoGrid = ({
                       autoPlay
                       playsInline
                       muted={participant.isLocal}
-                      className="w-full h-full object-cover"
-                      style={{
-                        transform: "translateZ(0)",
-                        backfaceVisibility: "hidden",
-                      }}
+                      className="w-full h-full object-cover bg-black"
                     />
                   ) : (
                     <div className="w-full h-full flex flex-col items-center justify-center p-4">
@@ -329,15 +354,6 @@ const VideoGrid = ({
                     )}
                   </div>
                 </div>
-
-                {/* Video Quality Indicator */}
-                {hasStream && videoTrack && (
-                  <div className="absolute bottom-2 right-2">
-                    <div className="text-xs text-gray-300 bg-black/30 px-2 py-1 rounded">
-                      {videoTrack.getSettings().height}p
-                    </div>
-                  </div>
-                )}
               </div>
             );
           })}
