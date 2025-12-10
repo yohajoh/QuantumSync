@@ -61,6 +61,7 @@ const RoomPage = () => {
   const isMountedRef = useRef(true);
   const peerConnectionsRef = useRef(new Map());
   const remoteStreamsRef = useRef(new Map());
+  const participantsRef = useRef([]);
 
   // Update refs when state changes
   useEffect(() => {
@@ -70,6 +71,10 @@ const RoomPage = () => {
   useEffect(() => {
     remoteStreamsRef.current = remoteStreams;
   }, [remoteStreams]);
+
+  useEffect(() => {
+    participantsRef.current = participants;
+  }, [participants]);
 
   // Check if mobile
   useEffect(() => {
@@ -153,7 +158,10 @@ const RoomPage = () => {
                 pc.addTrack(track, stream);
               }
             } catch (err) {
-              console.warn(`Failed to add ${track.kind} track:`, err);
+              console.warn(
+                `Failed to add ${track.kind} track to ${targetUserId}:`,
+                err
+              );
             }
           });
         }
@@ -189,8 +197,12 @@ const RoomPage = () => {
         const existingPc = peerConnectionsRef.current.get(targetUserId);
         if (existingPc) {
           existingPc.close();
+          peerConnectionsRef.current.delete(targetUserId);
         }
 
+        console.log(
+          `Creating peer connection with ${targetUserId} (initiator: ${isInitiator})`
+        );
         const pc = new RTCPeerConnection(configuration);
 
         // Add local tracks if available
@@ -202,34 +214,54 @@ const RoomPage = () => {
 
             try {
               pc.addTrack(track, localStreamRef.current);
+              console.log(`Added ${track.kind} track to ${targetUserId}`);
             } catch (err) {
-              console.warn(`Failed to add ${track.kind} track:`, err);
+              console.warn(
+                `Failed to add ${track.kind} track to ${targetUserId}:`,
+                err
+              );
             }
           });
         }
 
-        // Handle remote tracks
+        // Handle remote tracks - THIS IS CRITICAL
         pc.ontrack = (event) => {
-          console.log(`Received track from ${targetUserId}`, event.streams);
+          console.log(
+            `Received ${event.track.kind} track from ${targetUserId}`,
+            event.streams
+          );
           if (event.streams && event.streams[0]) {
             const newStream = event.streams[0];
+
+            // Update the remote streams map
             setRemoteStreams((prev) => {
               const newMap = new Map(prev);
               newMap.set(targetUserId, newStream);
               return newMap;
             });
+
+            console.log(`Remote stream for ${targetUserId} is now available`);
           }
         };
 
         // ICE candidate handling
         pc.onicecandidate = (event) => {
           if (event.candidate && socket?.connected) {
+            console.log(`Sending ICE candidate to ${targetUserId}`);
             socket.emit("ice-candidate", {
               candidate: event.candidate,
               to: targetUserId,
               from: userId.current,
             });
           }
+        };
+
+        // ICE gathering state
+        pc.onicegatheringstatechange = () => {
+          console.log(
+            `ICE gathering state with ${targetUserId}:`,
+            pc.iceGatheringState
+          );
         };
 
         // Connection state monitoring
@@ -239,22 +271,27 @@ const RoomPage = () => {
 
           if (state === "connected" || state === "completed") {
             console.log(`✅ Connected to ${targetUserId}`);
+            toast.success(
+              `Connected to ${
+                participantsRef.current.find((p) => p.userId === targetUserId)
+                  ?.userName || targetUserId
+              }`
+            );
           } else if (state === "failed") {
             console.log(
               `❌ Connection failed with ${targetUserId}, restarting ICE...`
             );
+            toast.error(`Connection failed with ${targetUserId}`);
+
             // Try to restart ICE
             setTimeout(() => {
-              if (
-                isMountedRef.current &&
-                peerConnectionsRef.current.has(targetUserId)
-              ) {
+              if (isMountedRef.current) {
                 const newPc = createPeerConnection(targetUserId, true);
                 if (newPc && isInitiator) {
                   sendOffer(newPc, targetUserId);
                 }
               }
-            }, 1000);
+            }, 2000);
           }
         };
 
@@ -266,11 +303,8 @@ const RoomPage = () => {
         };
 
         // Store connection
-        setPeerConnections((prev) => {
-          const newMap = new Map(prev);
-          newMap.set(targetUserId, pc);
-          return newMap;
-        });
+        peerConnectionsRef.current.set(targetUserId, pc);
+        setPeerConnections(new Map(peerConnectionsRef.current));
 
         return pc;
       } catch (error) {
@@ -284,19 +318,29 @@ const RoomPage = () => {
   // Send offer to a participant
   const sendOffer = async (pc, targetUserId) => {
     try {
-      const offer = await pc.createOffer({
+      console.log(`Sending offer to ${targetUserId}`);
+
+      const offerOptions = {
         offerToReceiveAudio: true,
         offerToReceiveVideo: true,
-      });
+      };
+
+      const offer = await pc.createOffer(offerOptions);
+      console.log(`Created offer for ${targetUserId}:`, offer.type);
+
       await pc.setLocalDescription(offer);
+      console.log(`Set local description for ${targetUserId}`);
 
       socket.emit("offer", {
         offer: pc.localDescription,
         to: targetUserId,
         from: userId.current,
       });
+
+      console.log(`Offer sent to ${targetUserId} via socket`);
     } catch (error) {
       console.error("Error sending offer:", error);
+      toast.error(`Failed to send offer to ${targetUserId}`);
     }
   };
 
@@ -305,7 +349,7 @@ const RoomPage = () => {
     if (participant.userId === userId.current) return;
 
     console.log(
-      `Setting up connection with new participant: ${participant.userId}`
+      `Setting up connection with new participant: ${participant.userName} (${participant.userId})`
     );
 
     // Create peer connection as initiator
@@ -317,7 +361,7 @@ const RoomPage = () => {
         if (peerConnectionsRef.current.has(participant.userId)) {
           sendOffer(pc, participant.userId);
         }
-      }, 100);
+      }, 500);
     }
   };
 
@@ -328,7 +372,7 @@ const RoomPage = () => {
       return;
     }
 
-    console.log(`Joining room: ${roomId}`);
+    console.log(`Joining room: ${roomId} as ${userName} (${userId.current})`);
     socket.emit("join-room", {
       roomId,
       userId: userId.current,
@@ -352,11 +396,18 @@ const RoomPage = () => {
       if (!isMountedRef.current || participant.userId === userId.current)
         return;
 
-      console.log(`New user joined: ${participant.userName}`);
+      console.log(
+        `New user joined: ${participant.userName} (${participant.userId})`
+      );
+
+      // Check if participant already exists
       setParticipants((prev) => {
         const exists = prev.some((p) => p.userId === participant.userId);
         if (exists) return prev;
-        return [...prev, participant];
+
+        const newParticipants = [...prev, participant];
+        participantsRef.current = newParticipants;
+        return newParticipants;
       });
 
       // Handle new participant connection
@@ -367,17 +418,23 @@ const RoomPage = () => {
       if (!isMountedRef.current) return;
 
       console.log(`User left: ${leftUserId}`);
-      setParticipants((prev) => prev.filter((p) => p.userId !== leftUserId));
 
-      // Cleanup
-      setPeerConnections((prev) => {
-        const newMap = new Map(prev);
-        const pc = newMap.get(leftUserId);
-        if (pc) pc.close();
-        newMap.delete(leftUserId);
-        return newMap;
+      // Remove from participants
+      setParticipants((prev) => {
+        const newParticipants = prev.filter((p) => p.userId !== leftUserId);
+        participantsRef.current = newParticipants;
+        return newParticipants;
       });
 
+      // Cleanup peer connection
+      const pc = peerConnectionsRef.current.get(leftUserId);
+      if (pc) {
+        pc.close();
+        peerConnectionsRef.current.delete(leftUserId);
+        setPeerConnections(new Map(peerConnectionsRef.current));
+      }
+
+      // Cleanup remote stream
       setRemoteStreams((prev) => {
         const newMap = new Map(prev);
         newMap.delete(leftUserId);
@@ -392,22 +449,35 @@ const RoomPage = () => {
 
       let pc = peerConnectionsRef.current.get(from);
       if (!pc) {
+        console.log(`Creating peer connection for offer from ${from}`);
         // Create peer connection as receiver (not initiator)
         pc = createPeerConnection(from, false);
       }
 
       try {
+        console.log(`Setting remote description from ${from}`);
         await pc.setRemoteDescription(new RTCSessionDescription(offer));
-        const answer = await pc.createAnswer();
+
+        console.log(`Creating answer for ${from}`);
+        const answer = await pc.createAnswer({
+          offerToReceiveAudio: true,
+          offerToReceiveVideo: true,
+        });
+
+        console.log(`Setting local description for ${from}`);
         await pc.setLocalDescription(answer);
 
+        console.log(`Sending answer to ${from}`);
         socket.emit("answer", {
           answer: pc.localDescription,
           to: from,
           from: userId.current,
         });
+
+        console.log(`Answer sent to ${from}`);
       } catch (error) {
         console.error("Error handling offer:", error);
+        toast.error(`Failed to handle offer from ${from}`);
       }
     };
 
@@ -416,21 +486,30 @@ const RoomPage = () => {
       const pc = peerConnectionsRef.current.get(from);
       if (pc) {
         try {
+          console.log(`Setting remote description from answer ${from}`);
           await pc.setRemoteDescription(new RTCSessionDescription(answer));
+          console.log(`Remote description set for ${from}`);
         } catch (error) {
           console.error("Error handling answer:", error);
         }
+      } else {
+        console.warn(`No peer connection found for ${from}`);
       }
     };
 
     const handleIceCandidate = async ({ candidate, from }) => {
+      console.log(`Received ICE candidate from ${from}`);
       const pc = peerConnectionsRef.current.get(from);
       if (pc && candidate) {
         try {
+          console.log(`Adding ICE candidate from ${from}`);
           await pc.addIceCandidate(new RTCIceCandidate(candidate));
+          console.log(`ICE candidate added from ${from}`);
         } catch (error) {
           console.error("Error adding ICE candidate:", error);
         }
+      } else {
+        console.warn(`No peer connection found for ICE candidate from ${from}`);
       }
     };
 
@@ -465,10 +544,16 @@ const RoomPage = () => {
         socket.emit("leave-room", { roomId, userId: userId.current });
       }
 
-      peerConnectionsRef.current.forEach((pc) => {
-        if (pc) pc.close();
+      // Close all peer connections
+      peerConnectionsRef.current.forEach((pc, targetUserId) => {
+        if (pc) {
+          pc.close();
+          console.log(`Closed connection with ${targetUserId}`);
+        }
       });
+      peerConnectionsRef.current.clear();
 
+      // Stop all media tracks
       if (localStreamRef.current) {
         localStreamRef.current.getTracks().forEach((track) => track.stop());
       }
@@ -492,13 +577,18 @@ const RoomPage = () => {
 
     setIsJoiningMeeting(true);
 
-    // Create connections with existing participants
-    participants.forEach((participant, index) => {
+    // Create connections with existing participants after media is ready
+    const existingParticipants = participantsRef.current;
+    console.log(
+      `Creating connections with ${existingParticipants.length} existing participants`
+    );
+
+    existingParticipants.forEach((participant, index) => {
       if (participant.userId !== userId.current) {
         setTimeout(() => {
           if (!isMountedRef.current) return;
           handleNewParticipant(participant);
-        }, index * 500);
+        }, index * 1000); // Stagger connections
       }
     });
   };
@@ -516,10 +606,12 @@ const RoomPage = () => {
       videoTrack.enabled = newState;
       setIsVideoEnabled(newState);
 
-      peerConnectionsRef.current.forEach((pc) => {
+      // Update all peer connections
+      peerConnectionsRef.current.forEach((pc, targetUserId) => {
         const sender = pc.getSenders().find((s) => s.track?.kind === "video");
         if (sender && videoTrack) {
           sender.replaceTrack(videoTrack);
+          console.log(`Updated video track for ${targetUserId}`);
         }
       });
 
@@ -541,10 +633,12 @@ const RoomPage = () => {
       audioTrack.enabled = newState;
       setIsAudioEnabled(newState);
 
-      peerConnectionsRef.current.forEach((pc) => {
+      // Update all peer connections
+      peerConnectionsRef.current.forEach((pc, targetUserId) => {
         const sender = pc.getSenders().find((s) => s.track?.kind === "audio");
         if (sender && audioTrack) {
           sender.replaceTrack(audioTrack);
+          console.log(`Updated audio track for ${targetUserId}`);
         }
       });
 
@@ -567,12 +661,13 @@ const RoomPage = () => {
         setActiveScreenShare(userId.current);
 
         const screenTrack = screenStream.getVideoTracks()[0];
-        peerConnectionsRef.current.forEach((pc) => {
+
+        // Replace video tracks in all peer connections
+        peerConnectionsRef.current.forEach((pc, targetUserId) => {
           const sender = pc.getSenders().find((s) => s.track?.kind === "video");
           if (sender && screenTrack) {
             sender.replaceTrack(screenTrack);
-          } else if (screenTrack) {
-            pc.addTrack(screenTrack, screenStreamRef.current);
+            console.log(`Started screen share for ${targetUserId}`);
           }
         });
 
@@ -594,10 +689,12 @@ const RoomPage = () => {
           ? localStreamRef.current.getVideoTracks()[0]
           : null;
 
-        peerConnectionsRef.current.forEach((pc) => {
+        // Restore original video tracks
+        peerConnectionsRef.current.forEach((pc, targetUserId) => {
           const sender = pc.getSenders().find((s) => s.track?.kind === "video");
           if (sender) {
             sender.replaceTrack(replacementTrack);
+            console.log(`Stopped screen share for ${targetUserId}`);
           }
         });
 
