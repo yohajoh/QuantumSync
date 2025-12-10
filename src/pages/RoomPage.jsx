@@ -31,7 +31,9 @@ const RoomPage = () => {
   const { socket, isConnected } = useSocket();
 
   const userName = searchParams.get("name") || "User";
-  const userId = useRef(`user_${Date.now()}`);
+  const userId = useRef(
+    `user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+  );
 
   const [participants, setParticipants] = useState([]);
   const [localStream, setLocalStream] = useState(null);
@@ -44,7 +46,7 @@ const RoomPage = () => {
   const [showChat, setShowChat] = useState(false);
   const [showParticipants, setShowParticipants] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [connectionStatus, setConnectionStatus] = useState("connecting");
+  const [connectionStatus, setConnectionStatus] = useState("initializing");
   const [isMobile, setIsMobile] = useState(false);
   const [hasCameraAccess, setHasCameraAccess] = useState(false);
   const [hasMicAccess, setHasMicAccess] = useState(false);
@@ -53,6 +55,7 @@ const RoomPage = () => {
   const [isJoiningMeeting, setIsJoiningMeeting] = useState(false);
   const [roomReady, setRoomReady] = useState(false);
 
+  // Store references
   const localStreamRef = useRef(null);
   const screenStreamRef = useRef(null);
   const isMountedRef = useRef(true);
@@ -60,14 +63,18 @@ const RoomPage = () => {
   // Check if mobile
   useEffect(() => {
     const checkMobile = () => {
-      setIsMobile(window.innerWidth < 768);
+      const mobile = window.innerWidth < 768;
+      setIsMobile(mobile);
+      return mobile;
     };
+
     checkMobile();
     window.addEventListener("resize", checkMobile);
 
     const handleFullscreenChange = () => {
       setIsFullscreen(!!document.fullscreenElement);
     };
+
     document.addEventListener("fullscreenchange", handleFullscreenChange);
 
     return () => {
@@ -84,24 +91,29 @@ const RoomPage = () => {
       { urls: "stun:stun1.l.google.com:19302" },
       { urls: "stun:stun2.l.google.com:19302" },
     ],
+    iceCandidatePoolSize: 10,
   };
 
   // Initialize media
   const initializeMedia = useCallback(async () => {
     try {
-      console.log("🎥 Requesting media...");
-      const stream = await navigator.mediaDevices.getUserMedia({
+      setConnectionStatus("requesting-media");
+
+      const constraints = {
         video: {
           width: { ideal: 1280, min: 640 },
           height: { ideal: 720, min: 480 },
           frameRate: { ideal: 30 },
+          facingMode: "user",
         },
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
           autoGainControl: true,
         },
-      });
+      };
+
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
 
       const videoTrack = stream.getVideoTracks()[0];
       const audioTrack = stream.getAudioTracks()[0];
@@ -109,26 +121,33 @@ const RoomPage = () => {
       setHasCameraAccess(!!videoTrack);
       setHasMicAccess(!!audioTrack);
 
-      videoTrack.enabled = isVideoEnabled;
-      audioTrack.enabled = isAudioEnabled;
+      if (videoTrack) videoTrack.enabled = isVideoEnabled;
+      if (audioTrack) audioTrack.enabled = isAudioEnabled;
 
       setLocalStream(stream);
       localStreamRef.current = stream;
       setConnectionStatus("connected");
 
-      console.log("✅ Media initialized");
       toast.success("Camera and microphone ready!");
       return stream;
     } catch (error) {
-      console.error("❌ Media error:", error);
-      if (error.name === "NotAllowedError") {
+      console.error("Media error:", error);
+
+      if (
+        error.name === "NotAllowedError" ||
+        error.name === "PermissionDeniedError"
+      ) {
+        // Continue without media
         setHasCameraAccess(false);
         setHasMicAccess(false);
+        setConnectionStatus("connected");
         toast.info("Joining without camera/microphone");
         return null;
+      } else {
+        toast.error("Failed to access media devices");
+        setConnectionStatus("error");
+        return null;
       }
-      toast.error("Failed to access media devices");
-      return null;
     }
   }, [isVideoEnabled, isAudioEnabled]);
 
@@ -136,9 +155,7 @@ const RoomPage = () => {
   const createPeerConnection = useCallback(
     (targetUserId) => {
       try {
-        console.log(`🔗 Creating peer connection with ${targetUserId}`);
-
-        // Close existing connection
+        // Close existing connection if any
         const existingPc = peerConnections.get(targetUserId);
         if (existingPc) {
           existingPc.close();
@@ -146,7 +163,7 @@ const RoomPage = () => {
 
         const pc = new RTCPeerConnection(configuration);
 
-        // Add local tracks
+        // Add local tracks if available
         if (localStreamRef.current) {
           localStreamRef.current.getTracks().forEach((track) => {
             try {
@@ -159,7 +176,7 @@ const RoomPage = () => {
 
         // Handle remote tracks
         pc.ontrack = (event) => {
-          console.log(`📹 Received track from ${targetUserId}`);
+          console.log(`Received track from ${targetUserId}`);
           if (event.streams && event.streams[0]) {
             setRemoteStreams((prev) => {
               const newMap = new Map(prev);
@@ -180,16 +197,37 @@ const RoomPage = () => {
           }
         };
 
-        // Connection state
+        // Connection state monitoring
         pc.oniceconnectionstatechange = () => {
           const state = pc.iceConnectionState;
-          console.log(`🌐 ICE state with ${targetUserId}: ${state}`);
+          console.log(`ICE state with ${targetUserId}:`, state);
 
           if (state === "connected" || state === "completed") {
             console.log(`✅ Connected to ${targetUserId}`);
             toast.success(`Connected to participant`);
           } else if (state === "failed") {
             console.log(`❌ Connection failed with ${targetUserId}`);
+          }
+        };
+
+        // Handle negotiation needed
+        pc.onnegotiationneeded = async () => {
+          try {
+            const offer = await pc.createOffer({
+              offerToReceiveAudio: true,
+              offerToReceiveVideo: true,
+            });
+            await pc.setLocalDescription(offer);
+
+            if (socket?.connected) {
+              socket.emit("offer", {
+                offer: pc.localDescription,
+                to: targetUserId,
+                from: userId.current,
+              });
+            }
+          } catch (error) {
+            console.error("Error in negotiation:", error);
           }
         };
 
@@ -209,44 +247,27 @@ const RoomPage = () => {
     [socket, configuration, peerConnections]
   );
 
-  // Send offer
-  const sendOffer = async (pc, targetUserId) => {
-    try {
-      console.log(`📤 Sending offer to ${targetUserId}`);
-      const offer = await pc.createOffer({
-        offerToReceiveAudio: true,
-        offerToReceiveVideo: true,
-      });
-      await pc.setLocalDescription(offer);
-
-      socket.emit("offer", {
-        offer: pc.localDescription,
-        to: targetUserId,
-        from: userId.current,
-      });
-    } catch (error) {
-      console.error("Error sending offer:", error);
-    }
-  };
-
-  // Setup socket
+  // Setup socket and room
   useEffect(() => {
     if (!socket || !isConnected) {
-      console.log("⌛ Waiting for socket connection...");
+      console.log("Waiting for socket connection...");
       return;
     }
 
-    console.log(`🚀 Joining room: ${roomId}`);
+    console.log(`Joining room: ${roomId}`);
     socket.emit("join-room", {
       roomId,
       userId: userId.current,
       userName,
     });
 
-    // Event handlers
+    // Setup socket event handlers
     const handleRoomJoined = ({ participants: existingParticipants }) => {
+      if (!isMountedRef.current) return;
+
       console.log(
-        `✅ Room joined. Participants: ${existingParticipants.length}`
+        "Room joined, existing participants:",
+        existingParticipants.length
       );
       setParticipants(existingParticipants);
       setRoomReady(true);
@@ -254,28 +275,32 @@ const RoomPage = () => {
     };
 
     const handleUserJoined = (participant) => {
-      if (participant.userId === userId.current) return;
+      if (!isMountedRef.current || participant.userId === userId.current)
+        return;
 
-      console.log(`👤 New user joined: ${participant.userName}`);
+      console.log(`New user joined: ${participant.userName}`);
       setParticipants((prev) => {
         const exists = prev.some((p) => p.userId === participant.userId);
         if (exists) return prev;
         return [...prev, participant];
       });
 
-      // Connect to new user
+      // Create connection with new user (only if we've already joined)
       if (isJoiningMeeting) {
-        setTimeout(() => {
-          const pc = createPeerConnection(participant.userId);
-          if (pc) {
-            sendOffer(pc, participant.userId);
-          }
-        }, 1000);
+        const pc = createPeerConnection(participant.userId);
+        if (pc) {
+          // Trigger offer
+          setTimeout(() => {
+            pc.onnegotiationneeded();
+          }, 500);
+        }
       }
     };
 
     const handleUserLeft = ({ userId: leftUserId }) => {
-      console.log(`👋 User left: ${leftUserId}`);
+      if (!isMountedRef.current) return;
+
+      console.log(`User left: ${leftUserId}`);
       setParticipants((prev) => prev.filter((p) => p.userId !== leftUserId));
 
       // Cleanup
@@ -295,16 +320,18 @@ const RoomPage = () => {
     };
 
     const handleOffer = async ({ offer, from }) => {
-      if (from === userId.current) return;
+      if (!isMountedRef.current || from === userId.current) return;
 
-      console.log(`📨 Received offer from ${from}`);
-      let pc = peerConnections.get(from);
-      if (!pc) {
-        pc = createPeerConnection(from);
-      }
+      console.log(`Received offer from ${from}`);
 
       try {
+        let pc = peerConnections.get(from);
+        if (!pc) {
+          pc = createPeerConnection(from);
+        }
+
         await pc.setRemoteDescription(new RTCSessionDescription(offer));
+
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
 
@@ -319,7 +346,7 @@ const RoomPage = () => {
     };
 
     const handleAnswer = async ({ answer, from }) => {
-      console.log(`📨 Received answer from ${from}`);
+      console.log(`Received answer from ${from}`);
       const pc = peerConnections.get(from);
       if (pc) {
         try {
@@ -342,10 +369,12 @@ const RoomPage = () => {
     };
 
     const handleNewMessage = (message) => {
-      setMessages((prev) => [...prev, message]);
+      if (isMountedRef.current) {
+        setMessages((prev) => [...prev, message]);
+      }
     };
 
-    // Attach handlers
+    // Attach all handlers
     socket.on("room-joined", handleRoomJoined);
     socket.on("user-joined", handleUserJoined);
     socket.on("user-left", handleUserLeft);
@@ -358,17 +387,21 @@ const RoomPage = () => {
     return () => {
       isMountedRef.current = false;
 
-      socket.off("room-joined");
-      socket.off("user-joined");
-      socket.off("user-left");
-      socket.off("offer");
-      socket.off("answer");
-      socket.off("ice-candidate");
-      socket.off("new-message");
+      if (socket) {
+        socket.off("room-joined");
+        socket.off("user-joined");
+        socket.off("user-left");
+        socket.off("offer");
+        socket.off("answer");
+        socket.off("ice-candidate");
+        socket.off("new-message");
 
-      socket.emit("leave-room", { roomId, userId: userId.current });
+        socket.emit("leave-room", { roomId, userId: userId.current });
+      }
 
-      peerConnections.forEach((pc) => pc.close());
+      peerConnections.forEach((pc) => {
+        if (pc) pc.close();
+      });
 
       if (localStreamRef.current) {
         localStreamRef.current.getTracks().forEach((track) => track.stop());
@@ -386,31 +419,34 @@ const RoomPage = () => {
     createPeerConnection,
   ]);
 
-  // Handle permission
+  // Handle permission decision
   const handlePermissionDecision = async (allowCamera) => {
     setShowPermissionOverlay(false);
     setIsJoiningMeeting(true);
 
+    let stream = null;
     if (allowCamera) {
-      await initializeMedia();
+      stream = await initializeMedia();
     } else {
       setHasCameraAccess(false);
       setHasMicAccess(false);
+      setConnectionStatus("connected");
     }
 
     // Connect to existing participants
     setTimeout(() => {
-      participants.forEach((participant, index) => {
+      participants.forEach((participant) => {
         if (participant.userId !== userId.current) {
-          setTimeout(() => {
-            const pc = createPeerConnection(participant.userId);
-            if (pc) {
-              sendOffer(pc, participant.userId);
-            }
-          }, index * 500);
+          const pc = createPeerConnection(participant.userId);
+          if (pc) {
+            // Trigger offer after a short delay
+            setTimeout(() => {
+              pc.onnegotiationneeded();
+            }, 1000);
+          }
         }
       });
-    }, 1000);
+    }, 500);
   };
 
   // Control functions
@@ -426,6 +462,7 @@ const RoomPage = () => {
       videoTrack.enabled = newState;
       setIsVideoEnabled(newState);
 
+      // Update all peer connections
       peerConnections.forEach((pc) => {
         const sender = pc.getSenders().find((s) => s.track?.kind === "video");
         if (sender && videoTrack) {
@@ -434,6 +471,8 @@ const RoomPage = () => {
       });
 
       toast.success(newState ? "Video enabled" : "Video disabled");
+    } else if (!hasCameraAccess) {
+      toast.error("No camera available");
     }
   };
 
@@ -449,6 +488,7 @@ const RoomPage = () => {
       audioTrack.enabled = newState;
       setIsAudioEnabled(newState);
 
+      // Update all peer connections
       peerConnections.forEach((pc) => {
         const sender = pc.getSenders().find((s) => s.track?.kind === "audio");
         if (sender && audioTrack) {
@@ -457,6 +497,8 @@ const RoomPage = () => {
       });
 
       toast.success(newState ? "Audio enabled" : "Audio muted");
+    } else if (!hasMicAccess) {
+      toast.error("No microphone available");
     }
   };
 
@@ -473,6 +515,8 @@ const RoomPage = () => {
         setActiveScreenShare(userId.current);
 
         const screenTrack = screenStream.getVideoTracks()[0];
+
+        // Replace video track with screen share track in all connections
         peerConnections.forEach((pc) => {
           const sender = pc.getSenders().find((s) => s.track?.kind === "video");
           if (sender && screenTrack) {
@@ -480,7 +524,10 @@ const RoomPage = () => {
           }
         });
 
-        screenTrack.onended = () => handleScreenShare();
+        screenTrack.onended = () => {
+          handleScreenShare();
+        };
+
         toast.success("Screen sharing started");
       } else {
         if (screenStreamRef.current) {
@@ -491,7 +538,10 @@ const RoomPage = () => {
         setIsScreenSharing(false);
         setActiveScreenShare(null);
 
-        const replacementTrack = localStreamRef.current?.getVideoTracks()[0];
+        const replacementTrack = localStreamRef.current
+          ? localStreamRef.current.getVideoTracks()[0]
+          : null;
+
         peerConnections.forEach((pc) => {
           const sender = pc.getSenders().find((s) => s.track?.kind === "video");
           if (sender && replacementTrack) {
@@ -502,6 +552,7 @@ const RoomPage = () => {
         toast.success("Screen sharing stopped");
       }
     } catch (error) {
+      console.error("Screen share error:", error);
       if (error.name !== "NotAllowedError") {
         toast.error("Failed to share screen");
       }
@@ -509,10 +560,15 @@ const RoomPage = () => {
   };
 
   const toggleFullscreen = () => {
+    const elem = document.documentElement;
     if (!isFullscreen) {
-      document.documentElement.requestFullscreen();
+      if (elem.requestFullscreen) {
+        elem.requestFullscreen();
+      }
     } else {
-      document.exitFullscreen();
+      if (document.exitFullscreen) {
+        document.exitFullscreen();
+      }
     }
   };
 
@@ -538,7 +594,7 @@ const RoomPage = () => {
     }
   };
 
-  // Permission overlay
+  // Show permission overlay when room is ready
   if (showPermissionOverlay && !isJoiningMeeting) {
     return (
       <div className="min-h-screen bg-gray-950 flex items-center justify-center p-4">
@@ -546,33 +602,44 @@ const RoomPage = () => {
           <div className="w-20 h-20 mx-auto mb-6 bg-primary-500/10 rounded-full flex items-center justify-center">
             <Video className="h-10 w-10 text-primary-400" />
           </div>
+
           <h1 className="text-2xl font-bold text-white mb-4">Join Meeting</h1>
           <p className="text-gray-400 mb-6">
-            Would you like to enable camera and microphone for this meeting?
+            QuantumSync works best with camera and microphone access. Would you
+            like to enable them for this meeting?
           </p>
+
           <div className="space-y-3">
             <button
               onClick={() => handlePermissionDecision(true)}
-              className="w-full py-3 bg-primary-600 hover:bg-primary-700 rounded-lg font-medium transition"
+              className="w-full py-3 bg-primary-600 hover:bg-primary-700 rounded-lg font-medium transition flex items-center justify-center space-x-2"
             >
-              Allow Camera & Microphone
+              <Video className="h-5 w-5" />
+              <span>Allow Camera & Microphone</span>
             </button>
+
             <button
               onClick={() => handlePermissionDecision(false)}
               className="w-full py-3 bg-gray-800 hover:bg-gray-700 rounded-lg font-medium transition"
             >
               Join Without Media
             </button>
+
             <button
               onClick={leaveRoom}
-              className="w-full py-3 bg-gray-800/50 hover:bg-gray-800 rounded-lg font-medium transition"
+              className="w-full py-3 bg-gray-800/50 hover:bg-gray-800 rounded-lg font-medium transition flex items-center justify-center space-x-2"
             >
-              Back to Home
+              <ArrowLeft className="h-5 w-5" />
+              <span>Back to Home</span>
             </button>
           </div>
+
           <div className="mt-6 pt-6 border-t border-gray-800">
             <p className="text-sm text-gray-500">
               Room: <span className="font-mono text-primary-400">{roomId}</span>
+            </p>
+            <p className="text-xs text-gray-600 mt-2">
+              Participants in room: {participants.length + 1}
             </p>
           </div>
         </div>
@@ -580,31 +647,45 @@ const RoomPage = () => {
     );
   }
 
-  // Meeting room
+  // Show meeting room
   if (isJoiningMeeting) {
+    // Mobile layout
     if (isMobile) {
       return (
-        <div className="min-h-screen bg-gray-950 text-gray-100">
+        <div className="min-h-screen bg-gray-950 text-gray-100 overflow-hidden">
           {/* Mobile Header */}
-          <div className="fixed top-0 left-0 right-0 bg-gray-900 border-b border-gray-800 p-4">
+          <div className="fixed top-0 left-0 right-0 z-50 bg-gray-900/95 backdrop-blur-lg border-b border-gray-800 p-4">
             <div className="flex items-center justify-between">
-              <div>
-                <p className="font-bold text-white">QuantumSync</p>
-                <p className="text-xs text-gray-400">
-                  {roomId} • {participants.length + 1} online
-                </p>
+              <div className="flex items-center space-x-3">
+                <Shield className="h-6 w-6 text-primary-500" />
+                <div>
+                  <p className="text-sm font-medium text-white">QuantumSync</p>
+                  <p className="text-xs text-gray-400 truncate max-w-[150px]">
+                    {roomId} • {participants.length + 1} online
+                  </p>
+                </div>
               </div>
-              <button
-                onClick={copyRoomId}
-                className="p-2 bg-gray-800 rounded-lg"
-              >
-                <Copy className="h-4 w-4" />
-              </button>
+              <div className="flex items-center space-x-2">
+                <button
+                  onClick={copyRoomId}
+                  className="p-2 bg-gray-800 rounded-lg"
+                  title="Copy Room ID"
+                >
+                  <Copy className="h-4 w-4" />
+                </button>
+                <button
+                  onClick={() => setShowParticipants(!showParticipants)}
+                  className="p-2 bg-gray-800 rounded-lg"
+                  title="Participants"
+                >
+                  <Users className="h-4 w-4" />
+                </button>
+              </div>
             </div>
           </div>
 
-          {/* Video Grid */}
-          <div className="pt-20 pb-24">
+          {/* Main Content */}
+          <div className="pt-16 pb-24 px-2">
             <VideoGrid
               localStream={localStream}
               remoteStreams={remoteStreams}
@@ -613,66 +694,151 @@ const RoomPage = () => {
               userName={userName}
               connectionStatus={connectionStatus}
               isMobile={true}
+              activeScreenShare={activeScreenShare}
             />
           </div>
 
-          {/* Mobile Controls */}
-          <div className="fixed bottom-0 left-0 right-0 bg-gray-900 border-t border-gray-800 p-4">
-            <div className="flex justify-around">
+          {/* Mobile Control Bar */}
+          <div className="fixed bottom-0 left-0 right-0 bg-gray-900/95 backdrop-blur-lg border-t border-gray-800 p-3 z-40">
+            <div className="flex items-center justify-around">
               <button
                 onClick={toggleVideo}
-                className={`p-3 rounded-lg ${
-                  isVideoEnabled ? "bg-gray-800" : "bg-red-600"
+                className={`flex flex-col items-center p-3 rounded-lg transition ${
+                  isVideoEnabled && hasCameraAccess
+                    ? "bg-gray-800"
+                    : "bg-red-600"
                 }`}
+                disabled={!hasCameraAccess}
               >
-                {isVideoEnabled ? (
-                  <Video className="h-5 w-5" />
+                {hasCameraAccess ? (
+                  isVideoEnabled ? (
+                    <Video className="h-5 w-5 text-green-400" />
+                  ) : (
+                    <VideoOff className="h-5 w-5 text-white" />
+                  )
                 ) : (
-                  <VideoOff className="h-5 w-5" />
+                  <CameraOff className="h-5 w-5 text-red-400" />
                 )}
+                <span className="text-xs mt-1 text-gray-300">
+                  {hasCameraAccess
+                    ? isVideoEnabled
+                      ? "Video"
+                      : "Off"
+                    : "No Cam"}
+                </span>
               </button>
+
               <button
                 onClick={toggleAudio}
-                className={`p-3 rounded-lg ${
-                  isAudioEnabled ? "bg-gray-800" : "bg-red-600"
+                className={`flex flex-col items-center p-3 rounded-lg transition ${
+                  isAudioEnabled && hasMicAccess ? "bg-gray-800" : "bg-red-600"
                 }`}
+                disabled={!hasMicAccess}
               >
-                {isAudioEnabled ? (
-                  <Mic className="h-5 w-5" />
+                {hasMicAccess ? (
+                  isAudioEnabled ? (
+                    <Mic className="h-5 w-5 text-green-400" />
+                  ) : (
+                    <MicOff className="h-5 w-5 text-white" />
+                  )
                 ) : (
-                  <MicOff className="h-5 w-5" />
+                  <MicOff className="h-5 w-5 text-red-400" />
                 )}
+                <span className="text-xs mt-1 text-gray-300">
+                  {hasMicAccess
+                    ? isAudioEnabled
+                      ? "Audio"
+                      : "Muted"
+                    : "No Mic"}
+                </span>
               </button>
+
               <button
                 onClick={handleScreenShare}
-                className={`p-3 rounded-lg ${
+                className={`flex flex-col items-center p-3 rounded-lg transition ${
                   isScreenSharing ? "bg-blue-600" : "bg-gray-800"
                 }`}
               >
-                <Share2 className="h-5 w-5" />
+                <Share2
+                  className={`h-5 w-5 ${
+                    isScreenSharing ? "text-white" : "text-blue-400"
+                  }`}
+                />
+                <span className="text-xs mt-1 text-gray-300">
+                  {isScreenSharing ? "Stop" : "Share"}
+                </span>
               </button>
+
               <button
                 onClick={() => setShowChat(!showChat)}
-                className="p-3 rounded-lg bg-gray-800"
+                className="flex flex-col items-center p-3 rounded-lg bg-gray-800 transition relative"
               >
-                <MessageSquare className="h-5 w-5" />
+                <MessageSquare className="h-5 w-5 text-purple-400" />
+                <span className="text-xs mt-1 text-gray-300">Chat</span>
+                {messages.length > 0 && (
+                  <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full h-4 w-4 flex items-center justify-center">
+                    {messages.length}
+                  </span>
+                )}
               </button>
-              <button onClick={leaveRoom} className="p-3 rounded-lg bg-red-600">
-                <Phone className="h-5 w-5" />
+
+              <button
+                onClick={leaveRoom}
+                className="flex flex-col items-center p-3 rounded-lg bg-red-600 transition"
+              >
+                <Phone className="h-5 w-5 text-white transform rotate-135" />
+                <span className="text-xs mt-1 text-white">Leave</span>
               </button>
             </div>
           </div>
 
-          {/* Chat Panel */}
+          {/* Mobile Overlay Panels */}
           {showChat && (
-            <div className="fixed inset-0 bg-gray-950 z-50 pt-20">
-              <ChatPanel
-                messages={messages}
-                onSendMessage={sendMessage}
-                currentUserId={userId.current}
-                mobile={true}
-                onClose={() => setShowChat(false)}
-              />
+            <div className="fixed inset-0 bg-gray-950 z-50 pt-16">
+              <div className="h-full flex flex-col">
+                <div className="flex items-center justify-between p-4 border-b border-gray-800">
+                  <h3 className="text-lg font-semibold text-white">Chat</h3>
+                  <button
+                    onClick={() => setShowChat(false)}
+                    className="p-2 hover:bg-gray-800 rounded-lg"
+                  >
+                    <X className="h-5 w-5 text-gray-400" />
+                  </button>
+                </div>
+                <div className="flex-1 overflow-hidden">
+                  <ChatPanel
+                    messages={messages}
+                    onSendMessage={sendMessage}
+                    currentUserId={userId.current}
+                    mobile={true}
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+
+          {showParticipants && (
+            <div className="fixed inset-0 bg-gray-950 z-50 pt-16">
+              <div className="h-full flex flex-col">
+                <div className="flex items-center justify-between p-4 border-b border-gray-800">
+                  <h3 className="text-lg font-semibold text-white">
+                    Participants ({participants.length + 1})
+                  </h3>
+                  <button
+                    onClick={() => setShowParticipants(false)}
+                    className="p-2 hover:bg-gray-800 rounded-lg"
+                  >
+                    <X className="h-5 w-5 text-gray-400" />
+                  </button>
+                </div>
+                <div className="flex-1 overflow-y-auto p-4">
+                  <ParticipantsPanel
+                    participants={participants}
+                    currentUser={{ userId: userId.current, userName }}
+                    mobile={true}
+                  />
+                </div>
+              </div>
             </div>
           )}
         </div>
@@ -683,39 +849,93 @@ const RoomPage = () => {
     return (
       <div className="min-h-screen bg-gray-950 text-gray-100">
         {/* Header */}
-        <header className="bg-gray-900 border-b border-gray-800 p-4">
-          <div className="max-w-7xl mx-auto flex items-center justify-between">
-            <div>
-              <h1 className="text-xl font-bold text-white">QuantumSync</h1>
-              <p className="text-sm text-gray-400">
-                {roomId} • {participants.length + 1} online
-              </p>
-            </div>
-            <div className="flex items-center space-x-3">
-              <button
-                onClick={copyRoomId}
-                className="px-4 py-2 bg-gray-800 rounded-lg"
-              >
-                Copy Room ID
-              </button>
-              <button
-                onClick={toggleFullscreen}
-                className="p-2 hover:bg-gray-800 rounded-lg"
-              >
-                {isFullscreen ? (
-                  <Minimize2 className="h-5 w-5" />
-                ) : (
-                  <Maximize2 className="h-5 w-5" />
-                )}
-              </button>
+        <header className="bg-gray-900/90 backdrop-blur-lg border-b border-gray-800">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div className="flex items-center justify-between h-16">
+              <div className="flex items-center space-x-4">
+                <div className="flex items-center space-x-3">
+                  <Shield className="h-8 w-8 text-primary-500" />
+                  <div>
+                    <h1 className="text-xl font-bold text-white">
+                      QuantumSync
+                    </h1>
+                    <div className="flex items-center space-x-2 text-sm text-gray-400">
+                      <span className="flex items-center space-x-1">
+                        <Users className="h-4 w-4" />
+                        <span>{participants.length + 1} online</span>
+                      </span>
+                      <span>•</span>
+                      <span className="font-mono">{roomId}</span>
+                      {activeScreenShare && (
+                        <span className="flex items-center space-x-1 text-yellow-400">
+                          <Share2 className="h-3 w-3" />
+                          <span>Screen Sharing</span>
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center space-x-3">
+                <button
+                  onClick={copyRoomId}
+                  className="flex items-center space-x-2 px-4 py-2 bg-gray-800 hover:bg-gray-700 rounded-lg transition"
+                  title="Copy Room ID"
+                >
+                  <Copy className="h-4 w-4" />
+                  <span>Copy ID</span>
+                </button>
+
+                <button
+                  onClick={toggleFullscreen}
+                  className="p-2 hover:bg-gray-800 rounded-lg transition"
+                  title={isFullscreen ? "Exit Fullscreen" : "Enter Fullscreen"}
+                >
+                  {isFullscreen ? (
+                    <Minimize2 className="h-5 w-5" />
+                  ) : (
+                    <Maximize2 className="h-5 w-5" />
+                  )}
+                </button>
+
+                <button
+                  onClick={() => setShowParticipants(!showParticipants)}
+                  className={`p-2 rounded-lg transition ${
+                    showParticipants ? "bg-gray-800" : "hover:bg-gray-800"
+                  }`}
+                  title="Participants"
+                >
+                  <Users className="h-5 w-5" />
+                </button>
+
+                <button
+                  onClick={() => setShowChat(!showChat)}
+                  className={`p-2 rounded-lg transition relative ${
+                    showChat ? "bg-gray-800" : "hover:bg-gray-800"
+                  }`}
+                  title="Chat"
+                >
+                  <MessageSquare className="h-5 w-5" />
+                  {messages.length > 0 && (
+                    <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full h-5 w-5 flex items-center justify-center">
+                      {messages.length}
+                    </span>
+                  )}
+                </button>
+              </div>
             </div>
           </div>
         </header>
 
-        <main className="max-w-7xl mx-auto p-4">
+        <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
           <div className="flex space-x-6">
-            {/* Video Area */}
-            <div className="flex-1">
+            {/* Main Video Area */}
+            <div
+              className={`flex-1 ${
+                showChat || showParticipants ? "lg:w-3/4" : "w-full"
+              }`}
+            >
               <VideoGrid
                 localStream={localStream}
                 remoteStreams={remoteStreams}
@@ -724,82 +944,94 @@ const RoomPage = () => {
                 userName={userName}
                 connectionStatus={connectionStatus}
                 isMobile={false}
+                activeScreenShare={activeScreenShare}
               />
 
-              <div className="mt-6 flex justify-center space-x-4">
-                <button
-                  onClick={toggleVideo}
-                  className={`px-6 py-3 rounded-lg ${
-                    isVideoEnabled ? "bg-gray-800" : "bg-red-600"
-                  }`}
-                >
-                  {isVideoEnabled ? "Video On" : "Video Off"}
-                </button>
-                <button
-                  onClick={toggleAudio}
-                  className={`px-6 py-3 rounded-lg ${
-                    isAudioEnabled ? "bg-gray-800" : "bg-red-600"
-                  }`}
-                >
-                  {isAudioEnabled ? "Audio On" : "Audio Off"}
-                </button>
-                <button
-                  onClick={handleScreenShare}
-                  className={`px-6 py-3 rounded-lg ${
-                    isScreenSharing ? "bg-blue-600" : "bg-gray-800"
-                  }`}
-                >
-                  {isScreenSharing ? "Stop Share" : "Share Screen"}
-                </button>
-                <button
-                  onClick={leaveRoom}
-                  className="px-6 py-3 bg-red-600 rounded-lg"
-                >
-                  Leave
-                </button>
-              </div>
+              <ControlBar
+                isVideoEnabled={isVideoEnabled && hasCameraAccess}
+                isAudioEnabled={isAudioEnabled && hasMicAccess}
+                isScreenSharing={isScreenSharing}
+                onToggleVideo={toggleVideo}
+                onToggleAudio={toggleAudio}
+                onToggleScreenShare={handleScreenShare}
+                onLeaveRoom={leaveRoom}
+                onToggleFullscreen={toggleFullscreen}
+                hasCameraAccess={hasCameraAccess}
+                hasMicAccess={hasMicAccess}
+              />
             </div>
 
-            {/* Chat Sidebar */}
-            <div className="w-80">
-              <div className="bg-gray-900 rounded-lg p-4">
-                <div className="flex items-center justify-between mb-4">
-                  <h3 className="font-semibold text-white">Chat</h3>
-                  <button
-                    onClick={() => setShowChat(!showChat)}
-                    className="p-1 hover:bg-gray-800 rounded"
-                  >
-                    <MessageSquare className="h-4 w-4" />
-                  </button>
-                </div>
+            {/* Side Panels */}
+            {(showChat || showParticipants) && (
+              <div className="space-y-6 lg:w-1/4">
+                {showParticipants && (
+                  <div className="relative">
+                    <button
+                      onClick={() => setShowParticipants(false)}
+                      className="absolute top-2 right-2 p-1 hover:bg-gray-800 rounded-lg z-10"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                    <ParticipantsPanel
+                      participants={participants}
+                      currentUser={{ userId: userId.current, userName }}
+                      mobile={false}
+                    />
+                  </div>
+                )}
+
                 {showChat && (
-                  <ChatPanel
-                    messages={messages}
-                    onSendMessage={sendMessage}
-                    currentUserId={userId.current}
-                    mobile={false}
-                  />
+                  <div className="relative">
+                    <button
+                      onClick={() => setShowChat(false)}
+                      className="absolute top-2 right-2 p-1 hover:bg-gray-800 rounded-lg z-10"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                    <ChatPanel
+                      messages={messages}
+                      onSendMessage={sendMessage}
+                      currentUserId={userId.current}
+                      mobile={false}
+                    />
+                  </div>
                 )}
               </div>
-            </div>
+            )}
           </div>
         </main>
       </div>
     );
   }
 
-  // Loading
+  // Initial loading state (shown while waiting for socket)
   if (!roomReady) {
     return (
-      <div className="min-h-screen bg-gray-950 flex items-center justify-center">
-        <div className="text-center">
-          <div className="w-16 h-16 border-4 border-primary-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
-          <p className="text-gray-400">Joining meeting...</p>
+      <div className="min-h-screen bg-gray-950 flex items-center justify-center p-4">
+        <div className="text-center space-y-6 max-w-md">
+          <div className="relative">
+            <div className="w-24 h-24 mx-auto border-4 border-primary-500/30 border-t-primary-500 rounded-full animate-spin"></div>
+            <div className="absolute inset-0 flex items-center justify-center">
+              <Video className="h-12 w-12 text-primary-500" />
+            </div>
+          </div>
+          <div className="space-y-3">
+            <h2 className="text-2xl font-bold text-white">
+              Joining Meeting...
+            </h2>
+            <p className="text-gray-400">Connecting to room: {roomId}</p>
+            {!isConnected && (
+              <p className="text-yellow-400 text-sm">
+                Waiting for connection...
+              </p>
+            )}
+          </div>
         </div>
       </div>
     );
   }
 
+  // This shouldn't happen, but just in case
   return null;
 };
 
